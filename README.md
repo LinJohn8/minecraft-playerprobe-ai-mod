@@ -1,6 +1,23 @@
 # Player Probe Fabric Mod
 
+<p align="center">
+  <img src="https://count.getloli.com/@minecraft-playerprobe-ai-mod?theme=minecraft&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Counter">
+</p>
+
 Client-only Fabric mod for Minecraft `26.1.2-Fabric`.
+
+## Support
+
+If this project helps you, you can support it here:
+
+- PayPal: https://www.paypal.com/paypalme/HWSLandDFTX8
+
+Payment QR codes:
+
+<p>
+  <img src="docs/assets/payment-qr-1.png" alt="Payment QR code 1" width="240">
+  <img src="docs/assets/payment-qr-2.png" alt="Payment QR code 2" width="240">
+</p>
 
 The mod starts a local HTTP server when the Minecraft client starts:
 
