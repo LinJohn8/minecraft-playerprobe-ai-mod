@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "playerprobe",
+  "version": "${version}",
+  "name": "Player Probe",
+  "description": "Local HTTP probe for Minecraft player and nearby block data.",
+  "authors": [
+    "hwslanddftx8"
+  ],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.playerprobe.PlayerProbeClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.1.2"
+  }
+}
