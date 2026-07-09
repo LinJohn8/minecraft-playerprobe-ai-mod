@@ -73,6 +73,14 @@ The mod starts a local HTTP server when the Minecraft client starts:
 - `GET http://127.0.0.1:8765/container`
 - `POST http://127.0.0.1:8765/container/transfer`
 - `GET/POST http://127.0.0.1:8765/craft/check`
+- `GET http://127.0.0.1:8765/survival/status`
+- `GET/POST http://127.0.0.1:8765/survival/missing`
+- `POST http://127.0.0.1:8765/survival/craftTool`
+- `POST http://127.0.0.1:8765/survival/craftMaterial`
+- `POST http://127.0.0.1:8765/survival/chopTree`
+- `POST http://127.0.0.1:8765/survival/dig`
+- `POST http://127.0.0.1:8765/survival/build`
+- `POST http://127.0.0.1:8765/survival/enchant`
 - `GET http://127.0.0.1:8765/screen/status`
 - `POST http://127.0.0.1:8765/screen/close`
 - `GET http://127.0.0.1:8765/events?since=0`
@@ -232,6 +240,36 @@ curl -X POST http://127.0.0.1:8765/chat/send \
   -H 'Content-Type: application/json' \
   -d '{"text":"hello from playerprobe"}'
 
+curl http://127.0.0.1:8765/survival/status
+
+curl -X POST http://127.0.0.1:8765/survival/missing \
+  -H 'Content-Type: application/json' \
+  -d '{"goal":"build","blockId":"minecraft:oak_planks","width":5,"depth":5,"height":3,"roof":true}'
+
+curl -X POST http://127.0.0.1:8765/survival/chopTree \
+  -H 'Content-Type: application/json' \
+  -d '{"radius":24,"maxLogs":8,"start":true}'
+
+curl -X POST http://127.0.0.1:8765/survival/craftTool \
+  -H 'Content-Type: application/json' \
+  -d '{"tier":"wooden","type":"pickaxe","count":1,"start":true}'
+
+curl -X POST http://127.0.0.1:8765/survival/craftMaterial \
+  -H 'Content-Type: application/json' \
+  -d '{"itemId":"minecraft:stick","count":1,"start":true}'
+
+curl -X POST http://127.0.0.1:8765/survival/dig \
+  -H 'Content-Type: application/json' \
+  -d '{"width":3,"length":3,"depth":2,"start":true}'
+
+curl -X POST http://127.0.0.1:8765/survival/build \
+  -H 'Content-Type: application/json' \
+  -d '{"blockId":"minecraft:oak_planks","width":5,"depth":5,"height":3,"roof":true,"start":false}'
+
+curl -X POST http://127.0.0.1:8765/survival/enchant \
+  -H 'Content-Type: application/json' \
+  -d '{"requiredLevel":1,"radius":16,"start":false}'
+
 curl -X POST http://127.0.0.1:8765/task/start \
   -H 'Content-Type: application/json' \
   -d '{
@@ -254,7 +292,13 @@ Process notes:
 - Key single-action write endpoints now also return `steps` and `verify` fields so the caller can reason about process and result instead of only success/failure.
 - `task/start` now creates a tracked task with `taskId`, `currentStepIndex`, `results`, and final `snapshot` state.
 - `task/status` can be polled while a longer player-like process is running, and now reports whether the current step has started, whether it is waiting for an in-progress action, and the live `currentActionState`.
-- `task/start` also supports process-oriented helper steps such as `retry`, `if`, `repeat`, `breakIf`, `wait`, `waitForScreen`, `waitForActionIdle`, `verifyBlock`, `verifyInventoryItem`, `verifyScreen`, `verifyContainer`, `selectHotbar`, `equipBest`, `openInventory`, `inventoryClick`, `containerTransfer`, `openNearbyCraftingTable`, `openNearbyContainer`, `containerTransferProcess`, `containerTransferProcessAutoRepair`, `craftInventoryProcess`, `craftInventoryProcessAutoRepair`, `craftTableProcess`, and `craftTableProcessAutoRepair`.
+- `task/start` also supports process-oriented helper steps such as `retry`, `if`, `repeat`, `breakIf`, `wait`, `waitForScreen`, `waitForActionIdle`, `verifyBlock`, `verifyInventoryItem`, `verifyScreen`, `verifyContainer`, `selectHotbar`, `equipBest`, `openInventory`, `inventoryClick`, `containerTransfer`, `openNearbyCraftingTable`, `openNearbyContainer`, `containerTransferProcess`, `containerTransferProcessAutoRepair`, `craftInventoryProcess`, `craftInventoryProcessAutoRepair`, `craftTableProcess`, `craftTableProcessAutoRepair`, `craftToolProcess`, `craftMaterialProcess`, `chopTreeProcess`, `digProcess`, `buildProcess`, and `enchantPrepareProcess`.
+- `/survival/*` endpoints are higher-level survival planners. They return material checks plus executable task steps by default; pass `{"start":true}` to execute the generated player-like task immediately.
+- `/survival/chopTree` finds a nearby vanilla log/stem, walks to it, equips the best mining tool, mines vertical logs one by one, waits for each break, verifies air, and picks up drops.
+- `/survival/craftTool` and `/survival/craftMaterial` generate inventory/workbench crafting chains, including basic prerequisite steps such as planks, sticks, crafting table crafting, and crafting table placement when needed.
+- `/survival/dig` generates a bounded block-by-block mining process for pits/holes.
+- `/survival/build` generates a basic house placement plan with floor, walls, doorway, and optional roof, plus missing-block analysis.
+- `/survival/enchant` exposes experience/lapis/table checks and a preparation chain for opening a nearby or placed enchanting table. Final option selection can be completed with the lower-level container interfaces after the screen is open.
 - `action/planPath` and `action/findBlocks` expose richer path/block planning surfaces for LLM decision making without immediately mutating the world.
 - `inventory/knowledge`, `inventory/find`, and `craft/check` expose more decision-friendly summaries before taking action.
 - `menu/worlds/detail`, `menu/worlds/rename`, `menu/worlds/delete`, and `menu/worlds/backup` extend singleplayer world CRUD/management.

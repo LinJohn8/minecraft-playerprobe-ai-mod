@@ -181,6 +181,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/container", this::handleContainer);
             server.createContext("/container/transfer", this::handleContainerTransfer);
             server.createContext("/craft/check", this::handleCraftCheck);
+            server.createContext("/survival/status", this::handleSurvivalStatus);
+            server.createContext("/survival/missing", this::handleSurvivalMissing);
+            server.createContext("/survival/craftTool", this::handleSurvivalCraftTool);
+            server.createContext("/survival/craftMaterial", this::handleSurvivalCraftMaterial);
+            server.createContext("/survival/chopTree", this::handleSurvivalChopTree);
+            server.createContext("/survival/dig", this::handleSurvivalDig);
+            server.createContext("/survival/build", this::handleSurvivalBuild);
+            server.createContext("/survival/enchant", this::handleSurvivalEnchant);
             server.createContext("/screen/status", this::handleScreenStatus);
             server.createContext("/screen/close", this::handleScreenClose);
             server.createContext("/events", this::handleEvents);
@@ -1275,6 +1283,93 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         JsonObject request = isPost(exchange) ? readJsonObject(exchange) : queryJson(exchange);
         JsonObject result = runOnGameThread(client -> craftCheckFromRequest(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleSurvivalStatus(HttpExchange exchange) throws IOException {
+        if (!isGet(exchange)) {
+            sendText(exchange, 405, "Only GET is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject result = runOnGameThread(this::survivalStatusJson);
+        sendJson(exchange, result.has("error") ? 503 : 200, result);
+    }
+
+    private void handleSurvivalMissing(HttpExchange exchange) throws IOException {
+        if (!isGet(exchange) && !isPost(exchange)) {
+            sendText(exchange, 405, "Only GET or POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = isPost(exchange) ? readJsonObject(exchange) : queryJson(exchange);
+        JsonObject result = runOnGameThread(client -> survivalMissingFromRequest(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleSurvivalCraftTool(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> survivalCraftToolPlan(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleSurvivalCraftMaterial(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> survivalCraftMaterialPlan(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleSurvivalChopTree(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> survivalChopTreePlan(client, request));
+        sendJson(exchange, result.has("error") ? 404 : 200, result);
+    }
+
+    private void handleSurvivalDig(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> survivalDigPlan(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleSurvivalBuild(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> survivalBuildPlan(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleSurvivalEnchant(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> survivalEnchantPlan(client, request));
         sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
@@ -2862,6 +2957,797 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return root;
     }
 
+    private JsonObject survivalStatusJson(Minecraft client) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("processMode", "player_like");
+        root.add("inventory", inventoryKnowledgeJson(player));
+        root.add("nearbyUsefulBlocks", nearbyUsefulBlocksJson(level, player));
+        root.add("crafting", survivalCraftingAccessJson(level, player));
+        root.add("enchanting", survivalEnchantAccessJson(level, player));
+        return root;
+    }
+
+    private JsonObject survivalMissingFromRequest(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        if (player == null || client.level == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        JsonObject required = survivalRequirementsFromRequest(request);
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("goal", getString(request, "goal", getString(request, "itemId", "custom")));
+        root.add("required", required);
+        root.add("missing", missingRequirementsJson(player.getInventory(), required));
+        root.add("inventory", inventoryKnowledgeJson(player));
+        return root;
+    }
+
+    private JsonObject survivalCraftToolPlan(Minecraft client, JsonObject request) {
+        return survivalPlanResponse(client, request, "craftTool", survivalCraftToolSteps(client, request), survivalMissingFromRequest(client, toolRequirementRequest(request)));
+    }
+
+    private JsonObject survivalCraftMaterialPlan(Minecraft client, JsonObject request) {
+        return survivalPlanResponse(client, request, "craftMaterial", survivalCraftMaterialSteps(client, request), survivalMissingFromRequest(client, materialRequirementRequest(request)));
+    }
+
+    private JsonObject survivalChopTreePlan(Minecraft client, JsonObject request) {
+        return survivalPlanResponse(client, request, "chopTree", survivalChopTreeSteps(client, request), null);
+    }
+
+    private JsonObject survivalDigPlan(Minecraft client, JsonObject request) {
+        return survivalPlanResponse(client, request, "dig", survivalDigSteps(client, request), null);
+    }
+
+    private JsonObject survivalBuildPlan(Minecraft client, JsonObject request) {
+        SurvivalBuildPlan plan = survivalBuildSteps(client, request);
+        JsonObject detail = new JsonObject();
+        detail.addProperty("blockCount", plan.blockCount());
+        detail.add("origin", blockPosJson(plan.origin()));
+        detail.add("placements", plan.placements());
+        detail.add("missing", plan.missing());
+        return survivalPlanResponse(client, request, "build", plan.steps(), detail);
+    }
+
+    private JsonObject survivalEnchantPlan(Minecraft client, JsonObject request) {
+        JsonObject detail = new JsonObject();
+        LocalPlayer player = client.player;
+        if (player != null && client.level != null) {
+            detail.addProperty("experienceLevel", player.experienceLevel);
+            detail.addProperty("requiredLevel", clamp(getInt(request, "requiredLevel", 1), 1, 30));
+            detail.addProperty("hasEnoughExperience", player.experienceLevel >= clamp(getInt(request, "requiredLevel", 1), 1, 30));
+            detail.add("enchanting", survivalEnchantAccessJson(client.level, player));
+            detail.add("missing", survivalEnchantMissingJson(player, client.level, request));
+        }
+        return survivalPlanResponse(client, request, "enchantPrepare", survivalEnchantSteps(client, request), detail);
+    }
+
+    private JsonObject survivalPlanResponse(Minecraft client, JsonObject request, String name, List<JsonObject> steps, JsonObject detail) {
+        LocalPlayer player = client.player;
+        if (player == null || client.level == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("name", name);
+        root.addProperty("processMode", "player_like");
+        root.addProperty("stepCount", steps.size());
+        root.add("steps", taskStepsJson(steps));
+        root.add("inventory", inventoryKnowledgeJson(player));
+        if (detail != null) {
+            root.add("detail", detail);
+        }
+
+        if (getBoolean(request, "start", false)) {
+            if (steps.isEmpty()) {
+                return errorJson("EmptyProcess", "No executable steps were generated.");
+            }
+            String taskId = "task-" + System.currentTimeMillis();
+            taskState = TaskState.running(taskId, steps, name);
+            root.addProperty("started", true);
+            root.add("task", taskState.toJson());
+        } else {
+            root.addProperty("started", false);
+            root.addProperty("startHint", "Pass {\"start\":true} to execute this process through /task/status.");
+        }
+        return root;
+    }
+
+    private JsonObject runGeneratedSurvivalProcessTask(Minecraft client, String name, List<JsonObject> generatedSteps) {
+        if (generatedSteps.isEmpty()) {
+            return errorJson("EmptyProcess", "No executable steps were generated for " + name + ".");
+        }
+        taskState.insertStepsAfterCurrent(generatedSteps);
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("processMode", "player_like");
+        root.addProperty("insertedStepCount", generatedSteps.size());
+        root.add("insertedSteps", taskStepsJson(generatedSteps));
+        return root;
+    }
+
+    private List<JsonObject> survivalCraftToolSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        if (player == null) {
+            return List.of();
+        }
+        String itemId = resolveToolItemId(request);
+        List<JsonObject> steps = new ArrayList<>();
+        addCraftingPrerequisiteSteps(steps, player, client.level, itemId);
+        JsonObject craft = taskStep("craftTableProcessAutoRepair");
+        craft.addProperty("itemId", itemId);
+        craft.addProperty("count", clamp(getInt(request, "count", 1), 1, 16));
+        steps.add(craft);
+        return steps;
+    }
+
+    private List<JsonObject> survivalCraftMaterialSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        if (player == null) {
+            return List.of();
+        }
+        String itemId = normalizeItemId(getString(request, "itemId", getString(request, "material", "minecraft:oak_planks")));
+        int count = clamp(getInt(request, "count", 1), 1, 64);
+        List<JsonObject> steps = new ArrayList<>();
+        if (itemId.endsWith("_planks")) {
+            JsonObject craft = taskStep("craftInventoryProcessAutoRepair");
+            craft.addProperty("itemId", itemId);
+            craft.addProperty("count", count);
+            steps.add(craft);
+            return steps;
+        }
+        if ("minecraft:stick".equals(itemId) || "minecraft:crafting_table".equals(itemId)) {
+            String plankId = preferredPlanksForInventory(player.getInventory());
+            if (inventoryCount(player.getInventory(), plankId) <= 0 && inventoryCountAny(player.getInventory(), logBlockIds()) > 0) {
+                JsonObject planks = taskStep("craftInventoryProcessAutoRepair");
+                planks.addProperty("itemId", preferredPlanksForInventory(player.getInventory()));
+                planks.addProperty("count", 1);
+                steps.add(planks);
+            }
+            JsonObject craft = taskStep("craftInventoryProcessAutoRepair");
+            craft.addProperty("itemId", itemId);
+            craft.addProperty("count", count);
+            steps.add(craft);
+            return steps;
+        }
+        if (requiresCraftingTable(itemId)) {
+            addCraftingPrerequisiteSteps(steps, player, client.level, itemId);
+            JsonObject craft = taskStep("craftTableProcessAutoRepair");
+            craft.addProperty("itemId", itemId);
+            craft.addProperty("count", count);
+            steps.add(craft);
+            return steps;
+        }
+        JsonObject craft = taskStep("craft");
+        craft.addProperty("itemId", itemId);
+        craft.addProperty("count", count);
+        steps.add(craft);
+        return steps;
+    }
+
+    private List<JsonObject> survivalChopTreeSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return List.of();
+        }
+
+        int radius = clamp(getInt(request, "radius", 24), 1, MAX_ACTION_RADIUS);
+        int maxLogs = clamp(getInt(request, "maxLogs", 8), 1, 32);
+        Optional<BlockPos> found = findNearestAnyBlock(level, player.blockPosition(), logBlockIds(), radius);
+        if (found.isEmpty()) {
+            return List.of();
+        }
+
+        String logId = blockIdAt(level, found.get());
+        List<BlockPos> logs = collectVerticalLogs(level, found.get(), maxLogs);
+        List<JsonObject> steps = new ArrayList<>();
+        JsonObject gotoLog = taskStep("gotoBlock");
+        gotoLog.addProperty("id", logId);
+        gotoLog.addProperty("radius", radius);
+        gotoLog.addProperty("standRange", 2);
+        steps.add(gotoLog);
+        steps.add(waitForActionIdleStep(20000));
+
+        for (BlockPos log : logs) {
+            JsonObject equip = taskStep("equipBest");
+            equip.addProperty("purpose", "mine");
+            equip.add("blockPos", blockPosJson(log));
+            steps.add(equip);
+
+            JsonObject mine = taskStep("mineBlock");
+            mine.addProperty("x", log.getX());
+            mine.addProperty("y", log.getY());
+            mine.addProperty("z", log.getZ());
+            steps.add(mine);
+            steps.add(waitForActionIdleStep(20000));
+
+            JsonObject verify = taskStep("verifyBlock");
+            verify.addProperty("x", log.getX());
+            verify.addProperty("y", log.getY());
+            verify.addProperty("z", log.getZ());
+            verify.addProperty("shouldBeAir", true);
+            steps.add(verify);
+        }
+
+        JsonObject pickup = taskStep("pickupItems");
+        pickup.addProperty("radius", 8);
+        pickup.addProperty("timeoutMs", 5000);
+        steps.add(pickup);
+        steps.add(waitForActionIdleStep(7000));
+        return steps;
+    }
+
+    private List<JsonObject> survivalDigSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return List.of();
+        }
+
+        BlockPos origin = request.has("x")
+            ? blockPosFromJson(request, player.blockPosition())
+            : player.blockPosition().relative(player.getDirection()).below();
+        int width = clamp(getInt(request, "width", 1), 1, 16);
+        int length = clamp(getInt(request, "length", 1), 1, 16);
+        int depth = clamp(getInt(request, "depth", 1), 1, 32);
+        int limit = clamp(getInt(request, "limit", 256), 1, 512);
+
+        List<JsonObject> steps = new ArrayList<>();
+        Optional<PathToBlock> path = findPathToStandNear(level, player.blockPosition(), origin, MAX_ACTION_RADIUS, 2);
+        path.ifPresent(pathToBlock -> {
+            JsonObject go = taskStep("goto");
+            go.addProperty("x", pathToBlock.standPos().getX());
+            go.addProperty("y", pathToBlock.standPos().getY());
+            go.addProperty("z", pathToBlock.standPos().getZ());
+            go.addProperty("radius", MAX_ACTION_RADIUS);
+            steps.add(go);
+            steps.add(waitForActionIdleStep(20000));
+        });
+
+        int added = 0;
+        for (int dy = 0; dy < depth && added < limit; dy++) {
+            for (int z = 0; z < length && added < limit; z++) {
+                for (int x = 0; x < width && added < limit; x++) {
+                    BlockPos pos = origin.offset(x, -dy, z);
+                    if (level.getBlockState(pos).isAir()) {
+                        continue;
+                    }
+                    JsonObject equip = taskStep("equipBest");
+                    equip.addProperty("purpose", "mine");
+                    equip.add("blockPos", blockPosJson(pos));
+                    steps.add(equip);
+
+                    JsonObject mine = taskStep("mineBlock");
+                    mine.addProperty("x", pos.getX());
+                    mine.addProperty("y", pos.getY());
+                    mine.addProperty("z", pos.getZ());
+                    steps.add(mine);
+                    steps.add(waitForActionIdleStep(20000));
+                    added++;
+                }
+            }
+        }
+        JsonObject pickup = taskStep("pickupItems");
+        pickup.addProperty("radius", 8);
+        pickup.addProperty("timeoutMs", 5000);
+        steps.add(pickup);
+        steps.add(waitForActionIdleStep(7000));
+        return steps;
+    }
+
+    private SurvivalBuildPlan survivalBuildSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return new SurvivalBuildPlan(List.of(), BlockPos.ZERO, 0, new JsonArray(), new JsonObject());
+        }
+
+        String blockId = normalizeItemId(getString(request, "blockId", getString(request, "itemId", "minecraft:oak_planks")));
+        int width = clamp(getInt(request, "width", 5), 3, 16);
+        int depth = clamp(getInt(request, "depth", 5), 3, 16);
+        int height = clamp(getInt(request, "height", 3), 2, 8);
+        boolean roof = getBoolean(request, "roof", true);
+        int limit = clamp(getInt(request, "limit", 512), 1, 1024);
+        BlockPos origin = request.has("x")
+            ? blockPosFromJson(request, player.blockPosition())
+            : player.blockPosition().relative(player.getDirection(), 3);
+
+        List<BlockPos> placements = basicHousePlacements(origin, width, depth, height, roof, limit);
+        List<JsonObject> steps = new ArrayList<>();
+        JsonObject select = taskStep("selectHotbar");
+        int slot = findMatchingHotbarSlot(player.getInventory(), blockId);
+        select.addProperty("slot", Math.max(0, slot));
+        steps.add(select);
+
+        for (BlockPos pos : placements) {
+            JsonObject place = taskStep("placeBlock");
+            place.addProperty("blockId", blockId);
+            place.addProperty("x", pos.getX());
+            place.addProperty("y", pos.getY());
+            place.addProperty("z", pos.getZ());
+            place.addProperty("face", "up");
+            place.addProperty("lookAtFirst", true);
+            steps.add(place);
+            steps.add(waitForActionIdleStep(250));
+        }
+
+        JsonArray placementJson = new JsonArray();
+        for (BlockPos pos : placements) {
+            placementJson.add(blockPosJson(pos));
+        }
+        JsonObject required = new JsonObject();
+        required.addProperty(blockId, placements.size());
+        JsonObject missing = missingRequirementsJson(player.getInventory(), required);
+        return new SurvivalBuildPlan(steps, origin, placements.size(), placementJson, missing);
+    }
+
+    private List<JsonObject> survivalEnchantSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return List.of();
+        }
+
+        List<JsonObject> steps = new ArrayList<>();
+        Optional<BlockPos> table = findNearestBlock(level, player.blockPosition(), "minecraft:enchanting_table", clamp(getInt(request, "radius", 16), 1, MAX_ACTION_RADIUS));
+        if (table.isPresent()) {
+            JsonObject go = taskStep("gotoBlock");
+            go.addProperty("id", "minecraft:enchanting_table");
+            go.addProperty("radius", clamp(getInt(request, "radius", 16), 1, MAX_ACTION_RADIUS));
+            go.addProperty("standRange", 2);
+            steps.add(go);
+            steps.add(waitForActionIdleStep(20000));
+
+            JsonObject interact = taskStep("interact");
+            interact.addProperty("x", table.get().getX());
+            interact.addProperty("y", table.get().getY());
+            interact.addProperty("z", table.get().getZ());
+            interact.addProperty("face", "up");
+            steps.add(interact);
+            steps.add(waitForScreenStep("EnchantmentScreen", 5000));
+            return steps;
+        }
+
+        if (inventoryCount(player.getInventory(), "minecraft:enchanting_table") > 0) {
+            BlockPos placeAt = player.blockPosition().relative(player.getDirection(), 2);
+            JsonObject place = taskStep("placeBlock");
+            place.addProperty("blockId", "minecraft:enchanting_table");
+            place.addProperty("x", placeAt.getX());
+            place.addProperty("y", placeAt.getY());
+            place.addProperty("z", placeAt.getZ());
+            place.addProperty("face", "up");
+            steps.add(place);
+            JsonObject interact = taskStep("interact");
+            interact.addProperty("x", placeAt.getX());
+            interact.addProperty("y", placeAt.getY());
+            interact.addProperty("z", placeAt.getZ());
+            interact.addProperty("face", "up");
+            steps.add(interact);
+            steps.add(waitForScreenStep("EnchantmentScreen", 5000));
+        }
+        return steps;
+    }
+
+    private void addCraftingPrerequisiteSteps(List<JsonObject> steps, LocalPlayer player, ClientLevel level, String itemId) {
+        Inventory inventory = player.getInventory();
+        String plankId = preferredPlanksForInventory(inventory);
+        if (needsWoodParts(itemId) && inventoryCountAny(inventory, plankItemIds()) < 4 && inventoryCountAny(inventory, logBlockIds()) > 0) {
+            JsonObject planks = taskStep("craftInventoryProcessAutoRepair");
+            planks.addProperty("itemId", plankId);
+            planks.addProperty("count", 1);
+            steps.add(planks);
+        }
+        if (needsSticks(itemId) && inventoryCount(inventory, "minecraft:stick") < 2) {
+            JsonObject sticks = taskStep("craftInventoryProcessAutoRepair");
+            sticks.addProperty("itemId", "minecraft:stick");
+            sticks.addProperty("count", 1);
+            steps.add(sticks);
+        }
+        if (requiresCraftingTable(itemId) && !hasCraftingTableAccess(level, player)) {
+            if (inventoryCount(inventory, "minecraft:crafting_table") <= 0) {
+                JsonObject table = taskStep("craftInventoryProcessAutoRepair");
+                table.addProperty("itemId", "minecraft:crafting_table");
+                table.addProperty("count", 1);
+                steps.add(table);
+            }
+            BlockPos tablePos = player.blockPosition().relative(player.getDirection(), 2);
+            JsonObject place = taskStep("placeBlock");
+            place.addProperty("blockId", "minecraft:crafting_table");
+            place.addProperty("x", tablePos.getX());
+            place.addProperty("y", tablePos.getY());
+            place.addProperty("z", tablePos.getZ());
+            place.addProperty("face", "up");
+            place.addProperty("lookAtFirst", true);
+            steps.add(place);
+            steps.add(waitForActionIdleStep(1000));
+        }
+    }
+
+    private JsonObject survivalRequirementsFromRequest(JsonObject request) {
+        String goal = getString(request, "goal", "").trim();
+        if ("build".equalsIgnoreCase(goal)) {
+            String blockId = normalizeItemId(getString(request, "blockId", getString(request, "itemId", "minecraft:oak_planks")));
+            int width = clamp(getInt(request, "width", 5), 3, 16);
+            int depth = clamp(getInt(request, "depth", 5), 3, 16);
+            int height = clamp(getInt(request, "height", 3), 2, 8);
+            boolean roof = getBoolean(request, "roof", true);
+            JsonObject required = new JsonObject();
+            required.addProperty(blockId, basicHousePlacements(BlockPos.ZERO, width, depth, height, roof, 1024).size());
+            return required;
+        }
+
+        String itemId = normalizeItemId(getString(request, "itemId", getString(request, "tool", getString(request, "material", ""))));
+        if (itemId.isBlank() && !goal.isBlank()) {
+            itemId = normalizeItemId(goal);
+        }
+        return simpleRequirementsForItem(itemId, clamp(getInt(request, "count", 1), 1, 64));
+    }
+
+    private JsonObject toolRequirementRequest(JsonObject request) {
+        JsonObject copy = request.deepCopy();
+        copy.addProperty("itemId", resolveToolItemId(request));
+        return copy;
+    }
+
+    private JsonObject materialRequirementRequest(JsonObject request) {
+        JsonObject copy = request.deepCopy();
+        copy.addProperty("itemId", normalizeItemId(getString(request, "itemId", getString(request, "material", "minecraft:oak_planks"))));
+        return copy;
+    }
+
+    private JsonObject simpleRequirementsForItem(String itemId, int count) {
+        JsonObject required = new JsonObject();
+        String id = normalizeItemId(itemId);
+        int multiplier = Math.max(1, count);
+        if (id.endsWith("_pickaxe") || id.endsWith("_axe") || id.endsWith("_shovel") || id.endsWith("_sword") || id.endsWith("_hoe")) {
+            String tier = id.substring("minecraft:".length(), id.lastIndexOf('_'));
+            String type = id.substring(id.lastIndexOf('_') + 1);
+            int head = switch (type) {
+                case "sword" -> 2;
+                case "shovel" -> 1;
+                default -> 3;
+            };
+            required.addProperty(materialForTier(tier), head * multiplier);
+            required.addProperty("minecraft:stick", (type.equals("hoe") ? 2 : type.equals("sword") || type.equals("shovel") ? 1 : 2) * multiplier);
+            required.addProperty("crafting_table_access", 1);
+            return required;
+        }
+        switch (id) {
+            case "minecraft:stick" -> required.addProperty("any_planks", 2 * multiplier);
+            case "minecraft:crafting_table" -> required.addProperty("any_planks", 4 * multiplier);
+            case "minecraft:chest" -> required.addProperty("any_planks", 8 * multiplier);
+            case "minecraft:furnace" -> required.addProperty("minecraft:cobblestone", 8 * multiplier);
+            case "minecraft:torch" -> {
+                required.addProperty("minecraft:stick", multiplier);
+                required.addProperty("coal_or_charcoal", multiplier);
+            }
+            default -> {
+                if (id.endsWith("_planks")) {
+                    required.addProperty("any_logs", multiplier);
+                } else {
+                    required.addProperty(id, multiplier);
+                }
+            }
+        }
+        return required;
+    }
+
+    private JsonObject missingRequirementsJson(Inventory inventory, JsonObject required) {
+        JsonArray missing = new JsonArray();
+        boolean ok = true;
+        for (Map.Entry<String, JsonElement> entry : required.entrySet()) {
+            String id = entry.getKey();
+            int needed = Math.max(0, entry.getValue().getAsInt());
+            int available = availableForRequirement(inventory, id);
+            if (available < needed) {
+                ok = false;
+                JsonObject item = new JsonObject();
+                item.addProperty("id", id);
+                item.addProperty("needed", needed);
+                item.addProperty("available", available);
+                item.addProperty("missing", needed - available);
+                missing.add(item);
+            }
+        }
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", ok);
+        root.addProperty("missingCount", missing.size());
+        root.add("items", missing);
+        return root;
+    }
+
+    private int availableForRequirement(Inventory inventory, String id) {
+        return switch (id) {
+            case "any_logs" -> inventoryCountAny(inventory, logBlockIds());
+            case "any_planks" -> inventoryCountAny(inventory, plankItemIds());
+            case "coal_or_charcoal" -> inventoryCountAny(inventory, List.of("minecraft:coal", "minecraft:charcoal"));
+            case "crafting_table_access" -> inventoryCount(inventory, "minecraft:crafting_table");
+            default -> inventoryCount(inventory, normalizeItemId(id));
+        };
+    }
+
+    private JsonObject nearbyUsefulBlocksJson(ClientLevel level, LocalPlayer player) {
+        JsonObject root = new JsonObject();
+        root.add("logs", findAnyBlocksJson(level, player.blockPosition(), logBlockIds(), 24, 8));
+        root.add("craftingTables", findBlocksJson(level, player.blockPosition(), "minecraft:crafting_table", 24, 4));
+        root.add("furnaces", findBlocksJson(level, player.blockPosition(), "minecraft:furnace", 24, 4));
+        root.add("enchantingTables", findBlocksJson(level, player.blockPosition(), "minecraft:enchanting_table", 24, 4));
+        return root;
+    }
+
+    private JsonObject survivalCraftingAccessJson(ClientLevel level, LocalPlayer player) {
+        JsonObject root = new JsonObject();
+        root.addProperty("hasCraftingTableItem", inventoryCount(player.getInventory(), "minecraft:crafting_table") > 0);
+        root.addProperty("nearCraftingTable", findNearestBlock(level, player.blockPosition(), "minecraft:crafting_table", 8).isPresent());
+        root.addProperty("hasAccess", hasCraftingTableAccess(level, player));
+        return root;
+    }
+
+    private JsonObject survivalEnchantAccessJson(ClientLevel level, LocalPlayer player) {
+        JsonObject root = new JsonObject();
+        root.addProperty("experienceLevel", player.experienceLevel);
+        root.addProperty("lapisCount", inventoryCount(player.getInventory(), "minecraft:lapis_lazuli"));
+        root.addProperty("hasEnchantingTableItem", inventoryCount(player.getInventory(), "minecraft:enchanting_table") > 0);
+        root.addProperty("nearEnchantingTable", findNearestBlock(level, player.blockPosition(), "minecraft:enchanting_table", 16).isPresent());
+        root.addProperty("nearBookshelves", findBlocksJson(level, player.blockPosition(), "minecraft:bookshelf", 8, 32).size());
+        return root;
+    }
+
+    private JsonObject survivalEnchantMissingJson(LocalPlayer player, ClientLevel level, JsonObject request) {
+        JsonObject missing = new JsonObject();
+        int requiredLevel = clamp(getInt(request, "requiredLevel", 1), 1, 30);
+        JsonArray items = new JsonArray();
+        if (player.experienceLevel < requiredLevel) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("id", "experience_level");
+            entry.addProperty("needed", requiredLevel);
+            entry.addProperty("available", player.experienceLevel);
+            entry.addProperty("missing", requiredLevel - player.experienceLevel);
+            items.add(entry);
+        }
+        if (inventoryCount(player.getInventory(), "minecraft:lapis_lazuli") <= 0) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("id", "minecraft:lapis_lazuli");
+            entry.addProperty("needed", 1);
+            entry.addProperty("available", 0);
+            entry.addProperty("missing", 1);
+            items.add(entry);
+        }
+        if (findNearestBlock(level, player.blockPosition(), "minecraft:enchanting_table", 16).isEmpty()
+            && inventoryCount(player.getInventory(), "minecraft:enchanting_table") <= 0) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("id", "minecraft:enchanting_table_or_nearby");
+            entry.addProperty("needed", 1);
+            entry.addProperty("available", 0);
+            entry.addProperty("missing", 1);
+            items.add(entry);
+        }
+        missing.addProperty("ok", items.size() == 0);
+        missing.addProperty("missingCount", items.size());
+        missing.add("items", items);
+        return missing;
+    }
+
+    private List<BlockPos> basicHousePlacements(BlockPos origin, int width, int depth, int height, boolean roof, int limit) {
+        List<BlockPos> placements = new ArrayList<>();
+        int doorX = width / 2;
+        for (int x = 0; x < width && placements.size() < limit; x++) {
+            for (int z = 0; z < depth && placements.size() < limit; z++) {
+                placements.add(origin.offset(x, 0, z));
+            }
+        }
+        for (int y = 1; y <= height && placements.size() < limit; y++) {
+            for (int x = 0; x < width && placements.size() < limit; x++) {
+                for (int z = 0; z < depth && placements.size() < limit; z++) {
+                    boolean wall = x == 0 || x == width - 1 || z == 0 || z == depth - 1;
+                    boolean door = z == 0 && x == doorX && (y == 1 || y == 2);
+                    if (wall && !door) {
+                        placements.add(origin.offset(x, y, z));
+                    }
+                }
+            }
+        }
+        if (roof) {
+            for (int x = 0; x < width && placements.size() < limit; x++) {
+                for (int z = 0; z < depth && placements.size() < limit; z++) {
+                    placements.add(origin.offset(x, height + 1, z));
+                }
+            }
+        }
+        return placements;
+    }
+
+    private String resolveToolItemId(JsonObject request) {
+        String explicit = normalizeItemId(getString(request, "itemId", getString(request, "tool", "")));
+        if (!explicit.isBlank() && explicit.contains("_")) {
+            return explicit;
+        }
+        String tier = getString(request, "tier", "wooden").trim().toLowerCase(Locale.ROOT);
+        String type = getString(request, "type", explicit.isBlank() ? "pickaxe" : explicit.replace("minecraft:", "")).trim().toLowerCase(Locale.ROOT);
+        return normalizeItemId(tier + "_" + type);
+    }
+
+    private boolean needsWoodParts(String itemId) {
+        return needsSticks(itemId) || "minecraft:crafting_table".equals(itemId) || "minecraft:chest".equals(itemId);
+    }
+
+    private boolean needsSticks(String itemId) {
+        return itemId.endsWith("_pickaxe") || itemId.endsWith("_axe") || itemId.endsWith("_shovel") || itemId.endsWith("_sword") || itemId.endsWith("_hoe")
+            || "minecraft:torch".equals(itemId) || "minecraft:ladder".equals(itemId);
+    }
+
+    private boolean requiresCraftingTable(String itemId) {
+        return itemId.endsWith("_pickaxe") || itemId.endsWith("_axe") || itemId.endsWith("_hoe")
+            || "minecraft:chest".equals(itemId) || "minecraft:furnace".equals(itemId);
+    }
+
+    private String materialForTier(String tier) {
+        return switch (tier) {
+            case "wooden" -> "any_planks";
+            case "stone" -> "minecraft:cobblestone";
+            case "iron" -> "minecraft:iron_ingot";
+            case "golden" -> "minecraft:gold_ingot";
+            case "diamond" -> "minecraft:diamond";
+            case "netherite" -> "minecraft:netherite_ingot";
+            default -> "any_planks";
+        };
+    }
+
+    private String preferredPlanksForInventory(Inventory inventory) {
+        for (String plank : plankItemIds()) {
+            if (inventoryCount(inventory, plank) > 0) {
+                return plank;
+            }
+        }
+        for (String log : logBlockIds()) {
+            if (inventoryCount(inventory, log) > 0) {
+                return planksForLogId(log);
+            }
+        }
+        return "minecraft:oak_planks";
+    }
+
+    private String planksForLogId(String logId) {
+        String id = normalizeItemId(logId);
+        if ("minecraft:crimson_stem".equals(id)) {
+            return "minecraft:crimson_planks";
+        }
+        if ("minecraft:warped_stem".equals(id)) {
+            return "minecraft:warped_planks";
+        }
+        int suffix = id.indexOf("_log");
+        if (suffix > "minecraft:".length()) {
+            return id.substring(0, suffix) + "_planks";
+        }
+        return "minecraft:oak_planks";
+    }
+
+    private boolean hasCraftingTableAccess(ClientLevel level, LocalPlayer player) {
+        return inventoryCount(player.getInventory(), "minecraft:crafting_table") > 0
+            || findNearestBlock(level, player.blockPosition(), "minecraft:crafting_table", 16).isPresent();
+    }
+
+    private int inventoryCount(Inventory inventory, String itemId) {
+        return inventoryItemCounts(inventory).getOrDefault(normalizeItemId(itemId), 0);
+    }
+
+    private int inventoryCountAny(Inventory inventory, List<String> itemIds) {
+        Map<String, Integer> counts = inventoryItemCounts(inventory);
+        int total = 0;
+        for (String itemId : itemIds) {
+            total += counts.getOrDefault(normalizeItemId(itemId), 0);
+        }
+        return total;
+    }
+
+    private List<String> logBlockIds() {
+        return List.of(
+            "minecraft:oak_log", "minecraft:spruce_log", "minecraft:birch_log", "minecraft:jungle_log",
+            "minecraft:acacia_log", "minecraft:dark_oak_log", "minecraft:mangrove_log", "minecraft:cherry_log",
+            "minecraft:pale_oak_log", "minecraft:crimson_stem", "minecraft:warped_stem"
+        );
+    }
+
+    private List<String> plankItemIds() {
+        return List.of(
+            "minecraft:oak_planks", "minecraft:spruce_planks", "minecraft:birch_planks", "minecraft:jungle_planks",
+            "minecraft:acacia_planks", "minecraft:dark_oak_planks", "minecraft:mangrove_planks", "minecraft:cherry_planks",
+            "minecraft:pale_oak_planks", "minecraft:crimson_planks", "minecraft:warped_planks"
+        );
+    }
+
+    private Optional<BlockPos> findNearestAnyBlock(ClientLevel level, BlockPos center, List<String> ids, int radius) {
+        Set<String> normalized = new HashSet<>();
+        for (String id : ids) {
+            normalized.add(normalizeBlockId(id));
+        }
+        List<BlockPos> matches = new ArrayList<>();
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-radius, -radius, -radius), center.offset(radius, radius, radius))) {
+            BlockPos immutable = pos.immutable();
+            if (normalized.contains(blockIdAt(level, immutable))) {
+                matches.add(immutable);
+            }
+        }
+        matches.sort(Comparator.comparingDouble(pos -> pos.distToCenterSqr(center.getX() + 0.5D, center.getY() + 0.5D, center.getZ() + 0.5D)));
+        return matches.stream().findFirst();
+    }
+
+    private JsonArray findAnyBlocksJson(ClientLevel level, BlockPos center, List<String> ids, int radius, int limit) {
+        JsonArray results = new JsonArray();
+        Set<String> normalized = new HashSet<>();
+        for (String id : ids) {
+            normalized.add(normalizeBlockId(id));
+        }
+        List<BlockPos> matches = new ArrayList<>();
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-radius, -radius, -radius), center.offset(radius, radius, radius))) {
+            BlockPos immutable = pos.immutable();
+            if (normalized.contains(blockIdAt(level, immutable))) {
+                matches.add(immutable);
+            }
+        }
+        matches.sort(Comparator.comparingDouble(pos -> pos.distToCenterSqr(center.getX() + 0.5D, center.getY() + 0.5D, center.getZ() + 0.5D)));
+        for (BlockPos pos : matches) {
+            if (results.size() >= limit) {
+                break;
+            }
+            JsonObject entry = blockJson(level, pos, null);
+            entry.addProperty("distance", Math.sqrt(pos.distToCenterSqr(center.getX() + 0.5D, center.getY() + 0.5D, center.getZ() + 0.5D)));
+            results.add(entry);
+        }
+        return results;
+    }
+
+    private List<BlockPos> collectVerticalLogs(ClientLevel level, BlockPos base, int maxLogs) {
+        List<BlockPos> logs = new ArrayList<>();
+        String baseId = blockIdAt(level, base);
+        BlockPos cursor = base;
+        while (logs.size() < maxLogs && baseId.equals(blockIdAt(level, cursor))) {
+            logs.add(cursor);
+            cursor = cursor.above();
+        }
+        return logs;
+    }
+
+    private String blockIdAt(ClientLevel level, BlockPos pos) {
+        return BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString();
+    }
+
+    private JsonObject taskStep(String action) {
+        JsonObject step = new JsonObject();
+        step.addProperty("action", action);
+        return step;
+    }
+
+    private JsonObject waitForActionIdleStep(int timeoutMs) {
+        JsonObject step = taskStep("waitForActionIdle");
+        step.addProperty("timeoutMs", timeoutMs);
+        return step;
+    }
+
+    private JsonObject waitForScreenStep(String screen, int timeoutMs) {
+        JsonObject step = taskStep("waitForScreen");
+        step.addProperty("screen", screen);
+        step.addProperty("timeoutMs", timeoutMs);
+        return step;
+    }
+
+    private JsonArray taskStepsJson(List<JsonObject> steps) {
+        JsonArray array = new JsonArray();
+        for (JsonObject step : steps) {
+            array.add(step.deepCopy());
+        }
+        return array;
+    }
+
     private JsonObject startTaskRequest(Minecraft client, JsonObject request) {
         LocalPlayer player = client.player;
         ClientLevel level = client.level;
@@ -2916,6 +3802,12 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "craftInventoryProcessAutoRepair" -> runCraftInventoryProcessAutoRepairTask(client, stepRequest);
             case "craftTableProcess" -> runCraftTableProcessTask(client, stepRequest);
             case "craftTableProcessAutoRepair" -> runCraftTableProcessAutoRepairTask(client, stepRequest);
+            case "craftToolProcess" -> runGeneratedSurvivalProcessTask(client, "craftToolProcess", survivalCraftToolSteps(client, stepRequest));
+            case "craftMaterialProcess" -> runGeneratedSurvivalProcessTask(client, "craftMaterialProcess", survivalCraftMaterialSteps(client, stepRequest));
+            case "chopTreeProcess" -> runGeneratedSurvivalProcessTask(client, "chopTreeProcess", survivalChopTreeSteps(client, stepRequest));
+            case "digProcess" -> runGeneratedSurvivalProcessTask(client, "digProcess", survivalDigSteps(client, stepRequest));
+            case "buildProcess" -> runGeneratedSurvivalProcessTask(client, "buildProcess", survivalBuildSteps(client, stepRequest).steps());
+            case "enchantPrepareProcess" -> runGeneratedSurvivalProcessTask(client, "enchantPrepareProcess", survivalEnchantSteps(client, stepRequest));
             case "lookAt" -> runActionLookAtTask(client, stepRequest);
             case "goto" -> runActionGotoTask(client, stepRequest);
             case "gotoBlock" -> runActionGotoBlockTask(client, stepRequest);
@@ -5527,6 +6419,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
     }
 
     private record RecipeSelection(RecipeHolder<?> holder, RecipeDisplayEntry entry, String menuType) {
+    }
+
+    private record SurvivalBuildPlan(List<JsonObject> steps, BlockPos origin, int blockCount, JsonArray placements, JsonObject missing) {
     }
 
     private record ObservationSnapshot(String screen, int selectedSlot, float health, String lookingBlockId) {

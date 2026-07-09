@@ -19,6 +19,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/inventory/knowledge`
   - `/craft/check`
   - `/screen/status`
+  - `/survival/status`
+  - `/survival/missing`
 - Player-like bounded actions:
   - `goto`
   - `gotoBlock`
@@ -58,6 +60,23 @@ what still needs to be finished for the Minecraft AI player mod.
   - `craftInventoryProcessAutoRepair`
   - `craftTableProcess`
   - `craftTableProcessAutoRepair`
+- Survival process endpoints added:
+  - `/survival/chopTree`
+  - `/survival/dig`
+  - `/survival/build`
+  - `/survival/craftTool`
+  - `/survival/craftMaterial`
+  - `/survival/enchant`
+- Survival task helpers added:
+  - `chopTreeProcess`
+  - `digProcess`
+  - `buildProcess`
+  - `craftToolProcess`
+  - `craftMaterialProcess`
+  - `enchantPrepareProcess`
+- Survival endpoints support preview-first planning and `{"start":true}` task
+  execution, with generated `steps`, inventory summaries, and missing-material
+  analysis where applicable.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.2.jar`
 
@@ -73,8 +92,9 @@ what still needs to be finished for the Minecraft AI player mod.
   - Inventory crafting and crafting-table crafting are implemented.
   - Basic higher-level process wrappers now exist.
   - Auto-repair wrappers for inventory crafting and table crafting now exist.
-  - Auto-repair wrapper for table crafting now exists.
-  - Still needs more reusable full-chain wrappers with stronger state recovery.
+  - Tool/material survival wrappers now add common prerequisite chains for
+    planks, sticks, crafting tables, and crafting-table access.
+  - Still needs richer recursive recipe planning for every vanilla recipe.
 - Inventory/container control:
   - Read, click, transfer, drop, select, equip are implemented.
   - High-level process wrappers now exist for nearby open + transfer.
@@ -89,19 +109,22 @@ what still needs to be finished for the Minecraft AI player mod.
   - richer branch semantics
   - continue-style semantics
   - stateful loop conditions
-  - Add higher-level process chains that are still broken into manual planner work:
-  - find crafting table -> goto -> open -> craft -> take result -> close with stronger auto-repair
-  - find container -> goto -> interact -> transfer -> close with stronger verification and auto-repair
+- Harden survival process chains:
+  - stronger stuck/obstacle recovery while chopping, digging, and building
+  - deterministic hotbar refill before large build placement chains
+  - final enchantment option selection after the enchanting table screen opens
 
 ### Medium Priority
 
 - Improve action/task status with more detailed stuck and obstacle information.
 - Add richer block/entity filtering and deterministic target selection helpers.
 - Add more explicit verification payloads for all write operations.
+- Add recipe-depth explanation for more vanilla blocks/items beyond the current
+  common survival tools/materials.
 
 ### Nice To Have
 
-- Reusable build chains for multi-step placement tasks.
+- More building templates beyond the basic house generator.
 - Better recipe depth and dependency explanation.
 - More menu/process helpers for create-world screen state introspection.
 
