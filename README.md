@@ -6,6 +6,13 @@
 
 Client-only Fabric mod for Minecraft `26.1.2-Fabric`.
 
+Project wiki source pages are kept in `docs/wiki/`. If the GitHub Wiki has
+already been initialized from the web UI, sync them with:
+
+```bash
+./scripts/sync-wiki.sh
+```
+
 ## Support
 
 If this project helps you, you can support it here:
