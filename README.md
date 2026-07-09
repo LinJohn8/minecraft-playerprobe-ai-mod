@@ -25,6 +25,7 @@ Payment QR codes:
 The mod starts a local HTTP server when the Minecraft client starts:
 
 - `GET http://127.0.0.1:8765/health`
+- `GET http://127.0.0.1:8765/status`
 - `GET http://127.0.0.1:8765/player`
 - `GET http://127.0.0.1:8765/blocks?radius=2`
 - `GET http://127.0.0.1:8765/raycast?distance=6`
@@ -350,6 +351,7 @@ curl http://127.0.0.1:8765/task/status
 
 Process notes:
 
+- `GET /status` is the unified "what is the player/mod doing now?" endpoint. It returns `activity.kind`, a readable `activity.summary`, and the current menu/task/action/player/world/container state for LLM polling.
 - `craft` now follows a player-like process instead of directly mutating inventory.
 - Inventory crafting expects the player inventory screen to be opened and uses the real crafting grid/result slot flow.
 - Crafting-table recipes expect a reachable nearby `minecraft:crafting_table`; the mod will only continue when the player is actually at the usable position and the table UI is opened.

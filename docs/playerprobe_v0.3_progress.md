@@ -13,6 +13,7 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/menu/worlds/rename`
   - `/menu/worlds/backup`
 - Planning/read interfaces for LLM decision making:
+  - `/status`
   - `/action/planPath`
   - `/action/findBlocks`
   - `/inventory/find`
@@ -164,6 +165,9 @@ what still needs to be finished for the Minecraft AI player mod.
   - Recipe ingredient extraction now uses vanilla placement info, improving
     shapeless recipe trees.
 - v0.3 planning expansions:
+  - `/status` provides a unified activity/status surface with `activity.kind`,
+    `activity.summary`, task/action/menu/player/world/container state, and
+    recent events.
   - `/survival/advancedPath` now emits bounded terrain repair steps for gaps,
     liquids, breakable obstruction, and vertical assist before retrying.
   - `/build/template` includes starter base, storage room, animal pen, crop

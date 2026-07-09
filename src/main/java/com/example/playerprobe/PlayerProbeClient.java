@@ -138,6 +138,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);
             server.createContext("/", this::handleIndex);
             server.createContext("/health", this::handleHealth);
+            server.createContext("/status", this::handleStatus);
             server.createContext("/player", exchange -> handleSnapshot(exchange, false));
             server.createContext("/blocks", exchange -> handleBlocks(exchange));
             server.createContext("/raycast", this::handleRaycast);
@@ -259,6 +260,16 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("time", Instant.now().toString());
         root.addProperty("playerReady", Minecraft.getInstance().player != null);
         sendJson(exchange, 200, root);
+    }
+
+    private void handleStatus(HttpExchange exchange) throws IOException {
+        if (!isGet(exchange)) {
+            sendText(exchange, 405, "Only GET is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject result = runOnGameThread(this::createUnifiedStatus);
+        sendJson(exchange, 200, result);
     }
 
     private void handleSnapshot(HttpExchange exchange, boolean includeBlocks) throws IOException {
@@ -2032,6 +2043,117 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
         originalInput = null;
         controlledInput.clear();
+    }
+
+    private JsonObject createUnifiedStatus(Minecraft client) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("time", Instant.now().toString());
+        root.add("activity", currentActivityJson(client));
+        root.add("menu", createMenuStatus(client));
+        root.add("task", taskState.toJson());
+        root.add("action", actionState.toJson());
+        root.add("screen", screenMetadataJson(client.screen));
+        if (level != null) {
+            root.add("world", worldJson(level));
+        }
+        if (player != null) {
+            root.add("player", playerJson(player));
+            root.add("playerBlock", blockPosJson(player.blockPosition()));
+            root.add("inventorySummary", inventorySummaryJson(player));
+            if (client.screen instanceof AbstractContainerScreen<?> || player.containerMenu != player.inventoryMenu) {
+                root.add("container", currentContainerJson(player));
+                root.add("containerSemantic", currentContainerSemanticJson(player));
+            }
+        }
+        root.add("recentEvents", recentEventsJson(8));
+        return root;
+    }
+
+    private JsonObject currentActivityJson(Minecraft client) {
+        JsonObject root = new JsonObject();
+        ActionKind actionKind = actionState.kind();
+        boolean inWorld = client.level != null && client.player != null;
+        String screen = screenName(client.screen);
+
+        if (client.screen instanceof LevelLoadingScreen) {
+            return activityJson("loading_world", "Loading a world.", true, "menu");
+        }
+        if (!inWorld) {
+            String summary = client.screen == null ? "Minecraft is not in a world and no menu screen is open." : "On menu screen: " + screen + ".";
+            return activityJson("menu", summary, false, "menu");
+        }
+        if (taskState.running()) {
+            String action = taskState.currentAction();
+            int stepNumber = taskState.currentStepIndex() + 1;
+            int stepCount = taskState.steps().size();
+            if (taskState.waitingForAction()) {
+                root = activityJson("task_action", "Running task '" + taskState.name() + "' step " + stepNumber + "/" + stepCount + ": " + action + ".", true, "task");
+                root.addProperty("taskId", taskState.taskId());
+                root.addProperty("taskName", taskState.name());
+                root.addProperty("stepIndex", taskState.currentStepIndex());
+                root.addProperty("stepCount", stepCount);
+                root.addProperty("currentAction", action);
+                root.addProperty("actionKind", actionKind.name().toLowerCase(Locale.ROOT));
+                return root;
+            }
+            if (taskState.waitingForCondition()) {
+                root = activityJson("task_waiting", "Task '" + taskState.name() + "' is waiting for " + taskState.waitConditionKind() + ".", true, "task");
+                root.addProperty("taskId", taskState.taskId());
+                root.addProperty("taskName", taskState.name());
+                root.addProperty("stepIndex", taskState.currentStepIndex());
+                root.addProperty("stepCount", stepCount);
+                root.addProperty("currentAction", action);
+                root.addProperty("waitConditionKind", taskState.waitConditionKind());
+                root.addProperty("waitConditionValue", taskState.waitConditionValue());
+                root.addProperty("waitUntilMs", taskState.waitUntilMs());
+                return root;
+            }
+            root = activityJson("task", "Running task '" + taskState.name() + "' step " + stepNumber + "/" + stepCount + ": " + action + ".", true, "task");
+            root.addProperty("taskId", taskState.taskId());
+            root.addProperty("taskName", taskState.name());
+            root.addProperty("stepIndex", taskState.currentStepIndex());
+            root.addProperty("stepCount", stepCount);
+            root.addProperty("currentAction", action);
+            return root;
+        }
+        if (actionKind != ActionKind.IDLE) {
+            String kind = actionKind.name().toLowerCase(Locale.ROOT);
+            return activityJson("action_" + kind, "Running " + kind + " action.", true, "action");
+        }
+        if (client.screen instanceof AbstractContainerScreen<?> || (client.player != null && client.player.containerMenu != client.player.inventoryMenu)) {
+            return activityJson("container_ui", "Inspecting or operating container UI: " + menuTypeName(client.player.containerMenu) + ".", false, "ui");
+        }
+        if (client.screen != null) {
+            return activityJson("screen", "On screen: " + screen + ".", false, "ui");
+        }
+        return activityJson("idle", "In world and idle.", false, "idle");
+    }
+
+    private JsonObject activityJson(String kind, String summary, boolean busy, String source) {
+        JsonObject root = new JsonObject();
+        root.addProperty("kind", kind);
+        root.addProperty("summary", summary);
+        root.addProperty("busy", busy);
+        root.addProperty("source", source);
+        return root;
+    }
+
+    private JsonArray recentEventsJson(int limit) {
+        JsonArray events = new JsonArray();
+        synchronized (eventLock) {
+            int skip = Math.max(0, recentEvents.size() - Math.max(0, limit));
+            int index = 0;
+            for (JsonObject event : recentEvents) {
+                if (index++ < skip) {
+                    continue;
+                }
+                events.add(event.deepCopy());
+            }
+        }
+        return events;
     }
 
     private JsonObject createMenuStatus(Minecraft client) {
@@ -8524,6 +8646,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return running;
         }
 
+        String taskId() {
+            return taskId;
+        }
+
+        String name() {
+            return name;
+        }
+
         int currentStepIndex() {
             return currentStepIndex;
         }
@@ -8577,6 +8707,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return waitingForCondition;
         }
 
+        String currentAction() {
+            return currentAction;
+        }
+
         void markStepStarted(String action, boolean waitingForAction) {
             this.stepStarted = true;
             this.waitingForAction = waitingForAction;
@@ -8627,6 +8761,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         String waitConditionKind() {
             return waitConditionKind;
+        }
+
+        String waitConditionValue() {
+            return waitConditionValue;
+        }
+
+        long waitUntilMs() {
+            return waitUntilMs;
         }
 
         boolean isConditionTimedOut() {
