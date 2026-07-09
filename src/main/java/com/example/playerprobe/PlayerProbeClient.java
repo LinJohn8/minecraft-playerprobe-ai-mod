@@ -1879,7 +1879,12 @@ public final class PlayerProbeClient implements ClientModInitializer {
         int attempt = taskState.noteAutoRecovery();
         JsonObject recoveryRequest = new JsonObject();
         recoveryRequest.addProperty("left", attempt % 2 == 1);
-        List<JsonObject> inserted = new ArrayList<>(survivalRecoverSteps(client, recoveryRequest));
+        recoveryRequest.addProperty("smart", true);
+        recoveryRequest.addProperty("bridgeBlockId", "minecraft:cobblestone");
+        JsonObject diagnostics = client.player != null && client.level != null
+            ? movementDiagnosticsJson(client, client.player, client.level)
+            : new JsonObject();
+        List<JsonObject> inserted = new ArrayList<>(smartRecoverySteps(client, recoveryRequest, diagnostics));
         JsonObject retry = retryableTaskStep(retryStep);
         if (retry != null) {
             inserted.add(retry);
@@ -1894,6 +1899,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         event.addProperty("stepIndex", currentStepIndex);
         event.addProperty("phase", phase);
         event.add("stuckAction", state.toJson());
+        event.add("diagnostics", diagnostics);
         event.add("insertedSteps", taskStepsJson(inserted));
         taskState.recordStep(event);
 
@@ -4012,11 +4018,17 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         List<BlockPos> placements = basicHousePlacements(origin, width, depth, height, roof, limit);
         List<JsonObject> steps = new ArrayList<>();
+        JsonObject required = new JsonObject();
+        required.addProperty(blockId, placements.size());
+        JsonObject missing = missingRequirementsJson(player.getInventory(), required);
+        addBuildMaterialStagingSteps(steps, request, required, missing);
+        addBuildAreaClearingSteps(steps, level, placements, blockId, request);
         JsonObject select = taskStep("selectHotbar");
         int slot = findMatchingHotbarSlot(player.getInventory(), blockId);
         select.addProperty("slot", Math.max(0, slot));
         steps.add(select);
 
+        boolean verifyPlacements = getBoolean(request, "verifyPlacements", true);
         for (BlockPos pos : placements) {
             JsonObject place = taskStep("placeBlock");
             place.addProperty("blockId", blockId);
@@ -4027,15 +4039,15 @@ public final class PlayerProbeClient implements ClientModInitializer {
             place.addProperty("lookAtFirst", true);
             steps.add(place);
             steps.add(waitForActionIdleStep(250));
+            if (verifyPlacements) {
+                steps.add(verifyBlockStep(blockId, pos));
+            }
         }
 
         JsonArray placementJson = new JsonArray();
         for (BlockPos pos : placements) {
             placementJson.add(blockPosJson(pos));
         }
-        JsonObject required = new JsonObject();
-        required.addProperty(blockId, placements.size());
-        JsonObject missing = missingRequirementsJson(player.getInventory(), required);
         return new SurvivalBuildPlan(steps, origin, placements.size(), placementJson, missing);
     }
 
@@ -4153,6 +4165,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
     }
 
     private List<JsonObject> survivalRecoverSteps(Minecraft client, JsonObject request) {
+        if (getBoolean(request, "smart", false) && client.player != null && client.level != null) {
+            return smartRecoverySteps(client, request, movementDiagnosticsJson(client, client.player, client.level));
+        }
         List<JsonObject> steps = new ArrayList<>();
         steps.add(taskStep("closeScreen"));
         JsonObject back = taskStep("move");
@@ -4168,6 +4183,90 @@ public final class PlayerProbeClient implements ClientModInitializer {
         steps.add(side);
         steps.add(waitForActionIdleStep(4000));
         return steps;
+    }
+
+    private List<JsonObject> smartRecoverySteps(Minecraft client, JsonObject request, JsonObject diagnostics) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return survivalRecoverSteps(client, recoveryFallbackRequest(request));
+        }
+
+        List<JsonObject> steps = new ArrayList<>();
+        steps.add(taskStep("closeScreen"));
+        String bridgeBlock = normalizeItemId(getString(request, "bridgeBlockId", "minecraft:cobblestone"));
+        Direction facing = player.getDirection();
+        BlockPos feet = player.blockPosition();
+        BlockPos front = feet.relative(facing);
+
+        if (jsonBoolean(diagnostics, "headBlocked", false) && canMineForRecovery(level, feet.above())) {
+            steps.add(mineBlockStep(feet.above()));
+            steps.add(waitForActionIdleStep(12000));
+        }
+        if (jsonBoolean(diagnostics, "frontBlocked", false)) {
+            if (canMineForRecovery(level, front)) {
+                steps.add(mineBlockStep(front));
+                steps.add(waitForActionIdleStep(12000));
+            }
+            if (canMineForRecovery(level, front.above())) {
+                steps.add(mineBlockStep(front.above()));
+                steps.add(waitForActionIdleStep(12000));
+            }
+        }
+        if (jsonBoolean(diagnostics, "frontGap", false) || isLiquidBlock(level, front.below())) {
+            steps.add(buildRefillStep(bridgeBlock, 0));
+            steps.add(placeBlockStep(bridgeBlock, front.below(), "up"));
+            steps.add(waitForActionIdleStep(3000));
+        }
+        if (jsonBoolean(diagnostics, "inLiquid", false) || jsonBoolean(diagnostics, "frontLiquid", false)) {
+            steps.add(buildRefillStep(bridgeBlock, 0));
+            BlockPos fill = jsonBoolean(diagnostics, "frontLiquid", false) ? front : feet;
+            steps.add(placeBlockStep(bridgeBlock, fill, "up"));
+            steps.add(waitForActionIdleStep(3000));
+            JsonObject jump = taskStep("move");
+            jump.addProperty("jump", true);
+            jump.addProperty("forward", true);
+            jump.addProperty("durationMs", clamp(getInt(request, "swimJumpMs", 700), 100, 3000));
+            steps.add(jump);
+            steps.add(waitForActionIdleStep(3000));
+        }
+
+        JsonObject back = taskStep("move");
+        back.addProperty("backward", true);
+        back.addProperty("jump", true);
+        back.addProperty("durationMs", clamp(getInt(request, "backMs", 550), 100, 3000));
+        steps.add(back);
+        steps.add(waitForActionIdleStep(3000));
+
+        JsonObject side = taskStep("move");
+        side.addProperty(getBoolean(request, "left", true) ? "left" : "right", true);
+        side.addProperty("jump", true);
+        side.addProperty("durationMs", clamp(getInt(request, "sideMs", 450), 100, 3000));
+        steps.add(side);
+        steps.add(waitForActionIdleStep(3000));
+        return steps;
+    }
+
+    private JsonObject recoveryFallbackRequest(JsonObject request) {
+        JsonObject fallback = request.deepCopy();
+        fallback.addProperty("smart", false);
+        return fallback;
+    }
+
+    private boolean canMineForRecovery(ClientLevel level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        return !state.isAir() && !isLiquidBlock(level, pos) && state.getDestroySpeed(level, pos) >= 0.0F;
+    }
+
+    private boolean jsonBoolean(JsonObject object, String key, boolean fallback) {
+        if (object == null || !object.has(key) || object.get(key).isJsonNull()) {
+            return fallback;
+        }
+        try {
+            return object.get(key).getAsBoolean();
+        } catch (RuntimeException error) {
+            return fallback;
+        }
     }
 
     private List<JsonObject> survivalSmeltSteps(Minecraft client, JsonObject request) {
@@ -4254,34 +4353,139 @@ public final class PlayerProbeClient implements ClientModInitializer {
         };
 
         int limit = clamp(getInt(request, "limit", 512), 1, 2048);
-        List<JsonObject> steps = new ArrayList<>();
         JsonObject counts = new JsonObject();
         JsonArray placementJson = new JsonArray();
+        List<BuildPlacement> limitedPlacements = new ArrayList<>();
         int added = 0;
         for (BuildPlacement placement : placements) {
             if (added >= limit) {
                 break;
             }
             counts.addProperty(placement.blockId(), counts.has(placement.blockId()) ? counts.get(placement.blockId()).getAsInt() + 1 : 1);
-            JsonObject refill = taskStep("refillHotbar");
-            refill.addProperty("itemId", placement.blockId());
-            refill.addProperty("hotbarSlot", 0);
-            steps.add(refill);
-            steps.add(placeBlockStep(placement.blockId(), placement.pos(), "up"));
+            limitedPlacements.add(placement);
             JsonObject entry = blockPosJson(placement.pos());
             entry.addProperty("blockId", placement.blockId());
             placementJson.add(entry);
             added++;
         }
+
+        List<JsonObject> steps = new ArrayList<>();
         JsonObject missing = missingRequirementsJson(player.getInventory(), counts);
+        addBuildMaterialStagingSteps(steps, request, counts, missing);
+        addBuildAreaClearingSteps(steps, client.level, limitedPlacements, request);
+        boolean verifyPlacements = getBoolean(request, "verifyPlacements", true);
+        int refillEvery = clamp(getInt(request, "refillEvery", 16), 1, 64);
+        int placedSinceRefill = refillEvery;
+        String lastBlockId = "";
+        for (BuildPlacement placement : limitedPlacements) {
+            JsonObject refill = taskStep("refillHotbar");
+            refill.addProperty("itemId", placement.blockId());
+            refill.addProperty("hotbarSlot", 0);
+            if (placedSinceRefill >= refillEvery || !placement.blockId().equals(lastBlockId)) {
+                steps.add(refill);
+                placedSinceRefill = 0;
+                lastBlockId = placement.blockId();
+            }
+            steps.add(placeBlockStep(placement.blockId(), placement.pos(), "up"));
+            placedSinceRefill++;
+            if (verifyPlacements) {
+                steps.add(verifyBlockStep(placement.blockId(), placement.pos()));
+            }
+        }
         return new SurvivalBuildPlan(steps, origin, added, placementJson, missing);
     }
 
     private List<JsonObject> buildRefillHotbarSteps(JsonObject request) {
+        return List.of(buildRefillStep(
+            normalizeItemId(getString(request, "itemId", getString(request, "blockId", ""))),
+            clamp(getInt(request, "hotbarSlot", 0), 0, 8)
+        ));
+    }
+
+    private JsonObject buildRefillStep(String itemId, int hotbarSlot) {
         JsonObject refill = taskStep("refillHotbar");
-        refill.addProperty("itemId", normalizeItemId(getString(request, "itemId", getString(request, "blockId", ""))));
-        refill.addProperty("hotbarSlot", clamp(getInt(request, "hotbarSlot", 0), 0, 8));
-        return List.of(refill);
+        refill.addProperty("itemId", normalizeItemId(itemId));
+        refill.addProperty("hotbarSlot", clamp(hotbarSlot, 0, 8));
+        return refill;
+    }
+
+    private void addBuildMaterialStagingSteps(List<JsonObject> steps, JsonObject request, JsonObject required, JsonObject missing) {
+        if (!getBoolean(request, "pullMissingFromStorage", false) || missing == null || !missing.has("items")) {
+            return;
+        }
+        JsonArray items = missing.getAsJsonArray("items");
+        if (items.isEmpty()) {
+            return;
+        }
+        JsonObject open = taskStep("openNearbyContainer");
+        open.addProperty("blockId", normalizeBlockId(getString(request, "storageBlockId", "minecraft:chest")));
+        open.addProperty("radius", clamp(getInt(request, "storageRadius", 16), 1, MAX_ACTION_RADIUS));
+        steps.add(open);
+        steps.add(waitForActionIdleStep(20000));
+        for (JsonElement element : items) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject item = element.getAsJsonObject();
+            String id = getString(item, "id", "");
+            if (id.startsWith("any_") || "crafting_table_access".equals(id)) {
+                continue;
+            }
+            JsonObject pull = quickMoveItemStep(id, clamp(getInt(item, "missing", 1), 1, 64), true, false);
+            steps.add(pull);
+        }
+        if (getBoolean(request, "closeStorageAfterPull", true)) {
+            steps.add(taskStep("closeScreen"));
+        }
+    }
+
+    private void addBuildAreaClearingSteps(List<JsonObject> steps, ClientLevel level, List<BlockPos> placements, String targetBlockId, JsonObject request) {
+        if (!getBoolean(request, "clearArea", false)) {
+            return;
+        }
+        Set<BlockPos> seen = new HashSet<>();
+        int limit = clamp(getInt(request, "clearLimit", 128), 1, 1024);
+        int added = 0;
+        for (BlockPos pos : placements) {
+            if (added >= limit || !seen.add(pos)) {
+                continue;
+            }
+            if (shouldClearBuildBlock(level, pos, targetBlockId)) {
+                steps.add(mineBlockStep(pos));
+                steps.add(waitForActionIdleStep(12000));
+                steps.add(verifyAirStep(pos));
+                added++;
+            }
+        }
+    }
+
+    private void addBuildAreaClearingSteps(List<JsonObject> steps, ClientLevel level, List<BuildPlacement> placements, JsonObject request) {
+        if (!getBoolean(request, "clearArea", false)) {
+            return;
+        }
+        Set<BlockPos> seen = new HashSet<>();
+        int limit = clamp(getInt(request, "clearLimit", 128), 1, 2048);
+        int added = 0;
+        for (BuildPlacement placement : placements) {
+            BlockPos pos = placement.pos();
+            if (added >= limit || !seen.add(pos)) {
+                continue;
+            }
+            if (shouldClearBuildBlock(level, pos, placement.blockId())) {
+                steps.add(mineBlockStep(pos));
+                steps.add(waitForActionIdleStep(12000));
+                steps.add(verifyAirStep(pos));
+                added++;
+            }
+        }
+    }
+
+    private boolean shouldClearBuildBlock(ClientLevel level, BlockPos pos, String targetBlockId) {
+        BlockState state = level.getBlockState(pos);
+        if (state.isAir() || isLiquidBlock(level, pos)) {
+            return false;
+        }
+        return !blockIdAt(level, pos).equals(normalizeBlockId(targetBlockId)) && state.getDestroySpeed(level, pos) >= 0.0F;
     }
 
     private List<JsonObject> survivalExperienceSteps(Minecraft client, JsonObject request) {
@@ -4700,6 +4904,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
         int radius = clamp(getInt(request, "radius", 16), 4, MAX_ACTION_RADIUS);
         BlockPos origin = player.blockPosition();
+        String routeId = "route-" + System.currentTimeMillis();
         List<BlockPos> waypoints = List.of(
             origin.offset(radius, 0, 0),
             origin.offset(radius, 0, radius),
@@ -4712,6 +4917,16 @@ public final class PlayerProbeClient implements ClientModInitializer {
         );
         List<JsonObject> steps = new ArrayList<>();
         int limit = clamp(getInt(request, "waypoints", 8), 1, waypoints.size());
+        if (getBoolean(request, "recordMarkers", true)) {
+            JsonObject start = taskStep("recordExploreMarker");
+            start.addProperty("label", "route_start");
+            start.addProperty("kind", "explore_route_start");
+            start.addProperty("routeId", routeId);
+            start.addProperty("x", origin.getX());
+            start.addProperty("y", origin.getY());
+            start.addProperty("z", origin.getZ());
+            steps.add(start);
+        }
         for (int i = 0; i < limit; i++) {
             BlockPos point = waypoints.get(i);
             JsonObject go = taskStep("goto");
@@ -4728,8 +4943,23 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 marker.addProperty("y", point.getY());
                 marker.addProperty("z", point.getZ());
                 marker.addProperty("kind", "explore_waypoint");
+                marker.addProperty("routeId", routeId);
+                marker.addProperty("routeIndex", i);
+                marker.addProperty("routeLimit", limit);
                 steps.add(marker);
             }
+        }
+        if (getBoolean(request, "recordMarkers", true)) {
+            JsonObject end = taskStep("recordExploreMarker");
+            end.addProperty("label", "route_end");
+            end.addProperty("kind", "explore_route_end");
+            end.addProperty("routeId", routeId);
+            BlockPos last = waypoints.get(limit - 1);
+            end.addProperty("x", last.getX());
+            end.addProperty("y", last.getY());
+            end.addProperty("z", last.getZ());
+            end.addProperty("routeLimit", limit);
+            steps.add(end);
         }
         return steps;
     }
@@ -4870,6 +5100,24 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return step;
     }
 
+    private JsonObject verifyBlockStep(String blockId, BlockPos pos) {
+        JsonObject step = taskStep("verifyBlock");
+        step.addProperty("blockId", normalizeBlockId(blockId));
+        step.addProperty("x", pos.getX());
+        step.addProperty("y", pos.getY());
+        step.addProperty("z", pos.getZ());
+        return step;
+    }
+
+    private JsonObject verifyAirStep(BlockPos pos) {
+        JsonObject step = taskStep("verifyBlock");
+        step.addProperty("shouldBeAir", true);
+        step.addProperty("x", pos.getX());
+        step.addProperty("y", pos.getY());
+        step.addProperty("z", pos.getZ());
+        return step;
+    }
+
     private JsonObject pickupStep(int radius, int timeoutMs) {
         JsonObject step = taskStep("pickupItems");
         step.addProperty("radius", radius);
@@ -4996,14 +5244,30 @@ public final class PlayerProbeClient implements ClientModInitializer {
         RecipeSelection selection = selectRecipeForCraft(client, player, level, itemId, false);
         root.addProperty("recipeFound", selection != null);
         if (selection == null) {
+            root.addProperty("explainStatus", "no_matching_recipe_found");
             return root;
         }
+        RecipeHolder<?> holder = selection.holder();
+        root.addProperty("recipeId", holder.id().identifier().toString());
+        root.addProperty("recipeType", holder.value().getType().toString());
+        root.addProperty("recipeGroup", holder.value().group());
+        root.addProperty("recipeCategory", holder.value().recipeBookCategory().toString());
+        root.addProperty("special", holder.value().isSpecial());
+        root.addProperty("placementImpossible", holder.value().placementInfo().isImpossibleToPlace());
         root.addProperty("menuType", selection.menuType());
         root.addProperty("craftableNow", selection.entry().canCraft(inventoryContents(player.getInventory())));
         JsonArray children = new JsonArray();
-        for (Ingredient ingredient : recipeIngredients(selection.holder())) {
+        List<Ingredient> ingredients = recipeIngredients(holder);
+        root.addProperty("ingredientCount", ingredients.size());
+        root.addProperty("ingredientSource", holder.value().placementInfo().ingredients().isEmpty() ? "fallback_or_unavailable" : "placement_info");
+        if (ingredients.isEmpty()) {
+            root.addProperty("explainStatus", holder.value().isSpecial() ? "special_recipe_no_standard_ingredients" : "no_standard_ingredients_available");
+        } else {
+            root.addProperty("explainStatus", "ingredients_available");
+        }
+        for (Ingredient ingredient : ingredients) {
             JsonObject child = ingredientJson(ingredient);
-            ingredient.items().findFirst().ifPresent(holder -> child.add("tree", recipeTreeJson(client, level, player, BuiltInRegistries.ITEM.getKey(holder.value()).toString(), depth - 1, seen)));
+            ingredient.items().findFirst().ifPresent(option -> child.add("tree", recipeTreeJson(client, level, player, BuiltInRegistries.ITEM.getKey(option.value()).toString(), depth - 1, seen)));
             children.add(child);
         }
         root.add("ingredients", children);
@@ -6834,6 +7098,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         marker.addProperty("kind", getString(request, "kind", "manual"));
         marker.addProperty("dimension", level.dimension().identifier().toString());
         marker.add("pos", blockPosJson(pos));
+        copyOptionalMarkerField(request, marker, "routeId");
+        copyOptionalMarkerField(request, marker, "routeIndex");
+        copyOptionalMarkerField(request, marker, "routeLimit");
+        copyOptionalMarkerField(request, marker, "notes");
         marker.addProperty("createdAtMs", System.currentTimeMillis());
         marker.addProperty("time", Instant.now().toString());
         synchronized (explorationLock) {
@@ -6862,9 +7130,57 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
         }
         root.add("markers", markers);
+        root.add("routes", explorationRoutesJson(markers));
         root.addProperty("count", markers.size());
         root.addProperty("storagePath", explorationMarkersPath().toString());
         return root;
+    }
+
+    private void copyOptionalMarkerField(JsonObject source, JsonObject target, String key) {
+        if (source.has(key) && !source.get(key).isJsonNull()) {
+            target.add(key, source.get(key).deepCopy());
+        }
+    }
+
+    private JsonArray explorationRoutesJson(JsonArray markers) {
+        Map<String, JsonObject> routes = new LinkedHashMap<>();
+        for (JsonElement element : markers) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject marker = element.getAsJsonObject();
+            String routeId = getString(marker, "routeId", "");
+            if (routeId.isBlank()) {
+                continue;
+            }
+            JsonObject route = routes.computeIfAbsent(routeId, id -> {
+                JsonObject created = new JsonObject();
+                created.addProperty("routeId", id);
+                created.addProperty("markerCount", 0);
+                created.add("waypoints", new JsonArray());
+                return created;
+            });
+            route.addProperty("markerCount", route.get("markerCount").getAsInt() + 1);
+            String kind = getString(marker, "kind", "");
+            if ("explore_route_start".equals(kind)) {
+                route.add("start", marker.deepCopy());
+            } else if ("explore_route_end".equals(kind)) {
+                route.add("end", marker.deepCopy());
+            } else if ("explore_waypoint".equals(kind)) {
+                route.getAsJsonArray("waypoints").add(marker.deepCopy());
+            }
+            if (!route.has("firstTime")) {
+                route.addProperty("firstTime", getString(marker, "time", ""));
+            }
+            route.addProperty("lastTime", getString(marker, "time", ""));
+        }
+
+        JsonArray result = new JsonArray();
+        for (JsonObject route : routes.values()) {
+            route.addProperty("waypointCount", route.getAsJsonArray("waypoints").size());
+            result.add(route);
+        }
+        return result;
     }
 
     private void ensureExplorationMarkersLoaded() {

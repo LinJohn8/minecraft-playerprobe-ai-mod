@@ -173,7 +173,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/task/start` and survival `start:true` tasks support `autoRecoverStuck`
     and `maxAutoRecoveries`.
   - The task runner can insert bounded recovery/retry steps when movement or
-    mining reports `stuck:true`.
+    mining reports `stuck:true`, and now records the movement diagnostics used
+    to select the recovery plan.
   - Task DSL now supports multi-branch `switch`, long-action-friendly
     `repeatUntil`, `continueIf`, and status-based conditions through
     `verifyStatus`.
@@ -187,6 +188,9 @@ what still needs to be finished for the Minecraft AI player mod.
     armor, bows, fishing rods, buckets, shields, and basic redstone parts.
   - Recipe ingredient extraction now uses vanilla placement info, improving
     shapeless recipe trees.
+  - `/craft/tree` now exposes recipe id/type/category, special flags,
+    ingredient source, and explanation status for recipes that do not expose
+    normal ingredients.
 - v0.3 planning expansions:
   - `/status` provides a unified activity/status surface with `activity.kind`,
     `activity.summary`, task/action/menu/player/world/container state, and
@@ -195,14 +199,21 @@ what still needs to be finished for the Minecraft AI player mod.
     gaps, liquids, head space, raycast, and recovery hints.
   - `/survival/advancedPath` now emits bounded terrain repair steps for gaps,
     liquids, breakable obstruction, and vertical assist before retrying.
+  - Task auto-recovery now chooses bounded repair actions from movement
+    diagnostics, including head-space mining, front obstruction mining, gap
+    bridging, and liquid fill/jump recovery.
   - `/build/template` includes starter base, storage room, animal pen, crop
     farm, mine entrance, portal room, watchtower, bridge, repeater line,
     redstone torch tower, and simple redstone clock templates.
+  - `/survival/build` and `/build/template` can optionally pull missing
+    materials from nearby storage, clear occupied build positions, batch hotbar
+    refills, and verify placements.
   - `/storage/organize` supports category-based transfer groups such as wood,
     blocks, ores, food, tools, combat, and farming.
   - `/survival/combat` supports optional shield bracing and kite/strafe steps.
   - `/explore/markers` and `recordExploreMarker` provide local exploration
-    memory for waypoints and persist them under `~/.playerprobe/`.
+    memory for waypoints, route start/end, route summaries, and persist them
+    under `~/.playerprobe/`.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.3.jar`
 
@@ -225,8 +236,11 @@ what still needs to be finished for the Minecraft AI player mod.
   - Common survival/building requirement guesses are broader, which improves
     `/survival/missing` and `/craft/tree` planning.
   - Shapeless ingredient extraction is improved through vanilla placement info.
+  - Recipe tree explanation now labels special/no-standard-ingredient recipes
+    instead of silently returning an empty tree.
   - Still needs complete dependency execution for every vanilla recipe and
-    special recipe explanations where vanilla exposes no normal ingredients.
+    custom handling for special recipes that vanilla exposes without normal
+    ingredients.
 - Inventory/container control:
   - Read, click, transfer, drop, select, equip are implemented.
   - High-level process wrappers now exist for nearby open + transfer.
@@ -245,7 +259,6 @@ what still needs to be finished for the Minecraft AI player mod.
 ### High Priority
 
 - Harden survival process chains:
-  - convert obstacle diagnostics into more automatic repair-plan selection
   - stronger bridge/mine path repair for caves, water, ladders, ravines, and
     vertical shafts
   - parse final rendered enchantment/trading/anvil labels where vanilla only
@@ -253,9 +266,10 @@ what still needs to be finished for the Minecraft AI player mod.
 
 ### Medium Priority
 
-- Improve automatic selection among existing stuck/obstacle recovery strategies.
+- Improve advanced pathfinding beyond bounded local repair for caves, ravines,
+  water, ladders, and vertical shafts.
 - Add richer block/entity filtering and deterministic target selection helpers.
-- Add more explicit verification payloads for all write operations.
+- Add more explicit verification payloads for remaining write operations.
 - Add recipe-depth explanation for more vanilla blocks/items beyond the current
   common survival tools/materials.
 - Add rendered UI text extraction where vanilla exposes only clues or widgets.
