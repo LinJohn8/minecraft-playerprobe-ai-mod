@@ -181,6 +181,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/inventory/drop", this::handleInventoryDrop);
             server.createContext("/container", this::handleContainer);
             server.createContext("/container/transfer", this::handleContainerTransfer);
+            server.createContext("/container/semantic", this::handleContainerSemantic);
+            server.createContext("/container/clickRole", this::handleContainerClickRole);
+            server.createContext("/container/button", this::handleContainerButton);
             server.createContext("/craft/check", this::handleCraftCheck);
             server.createContext("/survival/status", this::handleSurvivalStatus);
             server.createContext("/survival/missing", this::handleSurvivalMissing);
@@ -190,6 +193,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/survival/dig", this::handleSurvivalDig);
             server.createContext("/survival/build", this::handleSurvivalBuild);
             server.createContext("/survival/enchant", this::handleSurvivalEnchant);
+            server.createContext("/survival/enchantApply", this::handleSurvivalEnchantApply);
             server.createContext("/survival/advancedPath", this::handleSurvivalAdvancedPath);
             server.createContext("/survival/recover", this::handleSurvivalRecover);
             server.createContext("/survival/smelt", this::handleSurvivalSmelt);
@@ -204,9 +208,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/survival/dimension", this::handleSurvivalDimension);
             server.createContext("/survival/redstone", this::handleSurvivalRedstone);
             server.createContext("/survival/trade", this::handleSurvivalTrade);
+            server.createContext("/survival/tradeSelect", this::handleSurvivalTradeSelect);
             server.createContext("/survival/fish", this::handleSurvivalFish);
             server.createContext("/survival/brew", this::handleSurvivalBrew);
             server.createContext("/survival/anvil", this::handleSurvivalAnvil);
+            server.createContext("/survival/anvilApply", this::handleSurvivalAnvilApply);
             server.createContext("/survival/explore", this::handleSurvivalExplore);
             server.createContext("/craft/tree", this::handleCraftTree);
             server.createContext("/storage/organize", this::handleStorageOrganize);
@@ -1153,6 +1159,48 @@ public final class PlayerProbeClient implements ClientModInitializer {
         sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
+    private void handleContainerSemantic(HttpExchange exchange) throws IOException {
+        if (!isGet(exchange)) {
+            sendText(exchange, 405, "Only GET is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject result = runOnGameThread(client -> {
+            LocalPlayer player = client.player;
+            if (player == null) {
+                return errorJson("PlayerNotReady", "Enter a world first.");
+            }
+            JsonObject root = new JsonObject();
+            root.addProperty("ok", true);
+            root.add("semantic", currentContainerSemanticJson(player));
+            root.add("container", currentContainerJson(player));
+            return root;
+        });
+        sendJson(exchange, result.has("error") ? 503 : 200, result);
+    }
+
+    private void handleContainerClickRole(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> runContainerClickRoleTask(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
+    private void handleContainerButton(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> runContainerButtonTask(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
     private void handleActionPlaceBlock(HttpExchange exchange) throws IOException {
         if (!isPost(exchange)) {
             sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
@@ -1396,6 +1444,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
+    private void handleSurvivalEnchantApply(HttpExchange exchange) throws IOException {
+        handlePostPlanner(exchange, client -> request -> survivalEnchantApplyPlan(client, request));
+    }
+
     private void handleSurvivalAdvancedPath(HttpExchange exchange) throws IOException {
         handlePostPlanner(exchange, client -> request -> survivalAdvancedPathPlan(client, request));
     }
@@ -1452,6 +1504,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         handlePostPlanner(exchange, client -> request -> survivalTradePlan(client, request));
     }
 
+    private void handleSurvivalTradeSelect(HttpExchange exchange) throws IOException {
+        handlePostPlanner(exchange, client -> request -> survivalTradeSelectPlan(client, request));
+    }
+
     private void handleSurvivalFish(HttpExchange exchange) throws IOException {
         handlePostPlanner(exchange, client -> request -> survivalFishPlan(client, request));
     }
@@ -1462,6 +1518,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
     private void handleSurvivalAnvil(HttpExchange exchange) throws IOException {
         handlePostPlanner(exchange, client -> request -> survivalAnvilPlan(client, request));
+    }
+
+    private void handleSurvivalAnvilApply(HttpExchange exchange) throws IOException {
+        handlePostPlanner(exchange, client -> request -> survivalAnvilApplyPlan(client, request));
     }
 
     private void handleSurvivalExplore(HttpExchange exchange) throws IOException {
@@ -1729,6 +1789,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         double dz = target.z - pos.z;
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
         double dy = next.getY() - player.blockPosition().getY();
+        state.observeProgress(horizontalDistance, "path_no_progress", 5000L);
 
         if (horizontalDistance < 0.35D && Math.abs(dy) <= 1.2D) {
             state.advancePathIndex();
@@ -1788,6 +1849,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
             actionState = ActionState.idle("mine finished");
             restoreNormalInput(player);
             return;
+        }
+        if (System.currentTimeMillis() - state.startedAtMs() > 20000L) {
+            state.markStuck("mine_taking_too_long");
         }
 
         Direction face = state.targetFace() == null ? resolveBlockFace(player, target) : state.targetFace();
@@ -3158,6 +3222,15 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return survivalPlanResponse(client, request, "enchantPrepare", survivalEnchantSteps(client, request), detail);
     }
 
+    private JsonObject survivalEnchantApplyPlan(Minecraft client, JsonObject request) {
+        JsonObject detail = new JsonObject();
+        detail.addProperty("itemId", normalizeItemId(getString(request, "itemId", "")));
+        detail.addProperty("lapisItemId", normalizeItemId(getString(request, "lapisItemId", "minecraft:lapis_lazuli")));
+        detail.addProperty("option", clamp(getInt(request, "option", 0), 0, 2));
+        detail.addProperty("notes", "Prepares/open enchanting table, quick-moves item/lapis, clicks enchant button, then quick-moves the item back.");
+        return survivalPlanResponse(client, request, "enchantApply", survivalEnchantApplySteps(client, request), detail);
+    }
+
     private JsonObject survivalAdvancedPathPlan(Minecraft client, JsonObject request) {
         List<JsonObject> steps = survivalAdvancedPathSteps(client, request);
         JsonObject detail = new JsonObject();
@@ -3294,6 +3367,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return survivalPlanResponse(client, request, "trade", survivalTradeSteps(client, request), detail);
     }
 
+    private JsonObject survivalTradeSelectPlan(Minecraft client, JsonObject request) {
+        JsonObject detail = new JsonObject();
+        detail.addProperty("tradeIndex", clamp(getInt(request, "tradeIndex", 0), 0, 15));
+        detail.addProperty("paymentItemId", normalizeItemId(getString(request, "paymentItemId", "minecraft:emerald")));
+        detail.addProperty("notes", "Opens villager, selects trade button, quick-moves payment, and takes result if available.");
+        return survivalPlanResponse(client, request, "tradeSelect", survivalTradeSelectSteps(client, request), detail);
+    }
+
     private JsonObject survivalFishPlan(Minecraft client, JsonObject request) {
         JsonObject detail = new JsonObject();
         detail.addProperty("waitMs", clamp(getInt(request, "waitMs", 20000), 1000, 120000));
@@ -3314,6 +3395,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
         detail.addProperty("mode", getString(request, "mode", "open"));
         detail.addProperty("notes", "Places/opens an anvil. Repair/name operation is exposed as UI/container steps for LLM control.");
         return survivalPlanResponse(client, request, "anvil", survivalAnvilSteps(client, request), detail);
+    }
+
+    private JsonObject survivalAnvilApplyPlan(Minecraft client, JsonObject request) {
+        JsonObject detail = new JsonObject();
+        detail.addProperty("leftItemId", normalizeItemId(getString(request, "leftItemId", getString(request, "itemId", ""))));
+        detail.addProperty("rightItemId", normalizeItemId(getString(request, "rightItemId", getString(request, "materialItemId", ""))));
+        detail.addProperty("notes", "Opens/places anvil, quick-moves left/right items, and quick-moves the result. Rename text still needs UI text support.");
+        return survivalPlanResponse(client, request, "anvilApply", survivalAnvilApplySteps(client, request), detail);
     }
 
     private JsonObject survivalExplorePlan(Minecraft client, JsonObject request) {
@@ -3671,6 +3760,26 @@ public final class PlayerProbeClient implements ClientModInitializer {
             interact.addProperty("face", "up");
             steps.add(interact);
             steps.add(waitForScreenStep("EnchantmentScreen", 5000));
+        }
+        return steps;
+    }
+
+    private List<JsonObject> survivalEnchantApplySteps(Minecraft client, JsonObject request) {
+        List<JsonObject> steps = new ArrayList<>(survivalEnchantSteps(client, request));
+        String itemId = normalizeItemId(getString(request, "itemId", ""));
+        if (!itemId.isBlank()) {
+            steps.add(quickMoveItemStep(itemId, 1, false, true));
+        }
+        steps.add(quickMoveItemStep(normalizeItemId(getString(request, "lapisItemId", "minecraft:lapis_lazuli")), 1, false, true));
+        JsonObject button = taskStep("containerButton");
+        button.addProperty("buttonId", clamp(getInt(request, "option", 0), 0, 2));
+        steps.add(button);
+        JsonObject take = taskStep("containerClickRole");
+        take.addProperty("role", "item");
+        take.addProperty("mode", "quick_move");
+        steps.add(take);
+        if (getBoolean(request, "close", true)) {
+            steps.add(taskStep("closeScreen"));
         }
         return steps;
     }
@@ -4119,6 +4228,26 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return steps;
     }
 
+    private List<JsonObject> survivalTradeSelectSteps(Minecraft client, JsonObject request) {
+        List<JsonObject> steps = new ArrayList<>(survivalTradeSteps(client, request));
+        JsonObject button = taskStep("containerButton");
+        button.addProperty("buttonId", clamp(getInt(request, "tradeIndex", 0), 0, 15));
+        steps.add(button);
+        steps.add(quickMoveItemStep(normalizeItemId(getString(request, "paymentItemId", "minecraft:emerald")), clamp(getInt(request, "paymentCount", 1), 1, 64), false, true));
+        String secondPayment = normalizeItemId(getString(request, "secondPaymentItemId", ""));
+        if (!secondPayment.isBlank()) {
+            steps.add(quickMoveItemStep(secondPayment, clamp(getInt(request, "secondPaymentCount", 1), 1, 64), false, true));
+        }
+        JsonObject take = taskStep("containerClickRole");
+        take.addProperty("role", "result");
+        take.addProperty("mode", "quick_move");
+        steps.add(take);
+        if (getBoolean(request, "close", true)) {
+            steps.add(taskStep("closeScreen"));
+        }
+        return steps;
+    }
+
     private List<JsonObject> survivalFishSteps(Minecraft client, JsonObject request) {
         List<JsonObject> steps = new ArrayList<>();
         JsonObject refill = taskStep("refillHotbar");
@@ -4172,6 +4301,26 @@ public final class PlayerProbeClient implements ClientModInitializer {
         open.addProperty("blockId", "minecraft:anvil");
         open.addProperty("radius", clamp(getInt(request, "radius", 12), 1, MAX_ACTION_RADIUS));
         steps.add(open);
+        return steps;
+    }
+
+    private List<JsonObject> survivalAnvilApplySteps(Minecraft client, JsonObject request) {
+        List<JsonObject> steps = new ArrayList<>(survivalAnvilSteps(client, request));
+        String left = normalizeItemId(getString(request, "leftItemId", getString(request, "itemId", "")));
+        String right = normalizeItemId(getString(request, "rightItemId", getString(request, "materialItemId", "")));
+        if (!left.isBlank()) {
+            steps.add(quickMoveItemStep(left, 1, false, true));
+        }
+        if (!right.isBlank()) {
+            steps.add(quickMoveItemStep(right, 1, false, true));
+        }
+        JsonObject take = taskStep("containerClickRole");
+        take.addProperty("role", "result");
+        take.addProperty("mode", "quick_move");
+        steps.add(take);
+        if (getBoolean(request, "close", true)) {
+            steps.add(taskStep("closeScreen"));
+        }
         return steps;
     }
 
@@ -4961,6 +5110,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "inventoryClick" -> runInventoryClickTask(client, stepRequest);
             case "containerTransfer" -> runContainerTransferTask(client, stepRequest);
             case "containerQuickMoveItem" -> runContainerQuickMoveItemTask(client, stepRequest);
+            case "containerClickRole" -> runContainerClickRoleTask(client, stepRequest);
+            case "containerButton" -> runContainerButtonTask(client, stepRequest);
             case "refillHotbar" -> runRefillHotbarTask(client, stepRequest);
             case "openNearbyCraftingTable" -> runOpenNearbyCraftingTableTask(client, stepRequest);
             case "openNearbyContainer" -> runOpenNearbyContainerTask(client, stepRequest);
@@ -4985,9 +5136,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "dimensionProcess" -> runGeneratedSurvivalProcessTask(client, "dimensionProcess", survivalDimensionSteps(client, stepRequest));
             case "redstoneProcess" -> runGeneratedSurvivalProcessTask(client, "redstoneProcess", survivalRedstoneSteps(client, stepRequest));
             case "tradeProcess" -> runGeneratedSurvivalProcessTask(client, "tradeProcess", survivalTradeSteps(client, stepRequest));
+            case "tradeSelectProcess" -> runGeneratedSurvivalProcessTask(client, "tradeSelectProcess", survivalTradeSelectSteps(client, stepRequest));
             case "fishProcess" -> runGeneratedSurvivalProcessTask(client, "fishProcess", survivalFishSteps(client, stepRequest));
             case "brewProcess" -> runGeneratedSurvivalProcessTask(client, "brewProcess", survivalBrewSteps(client, stepRequest));
             case "anvilProcess" -> runGeneratedSurvivalProcessTask(client, "anvilProcess", survivalAnvilSteps(client, stepRequest));
+            case "anvilApplyProcess" -> runGeneratedSurvivalProcessTask(client, "anvilApplyProcess", survivalAnvilApplySteps(client, stepRequest));
             case "exploreProcess" -> runGeneratedSurvivalProcessTask(client, "exploreProcess", survivalExploreSteps(client, stepRequest));
             case "craftToolProcess" -> runGeneratedSurvivalProcessTask(client, "craftToolProcess", survivalCraftToolSteps(client, stepRequest));
             case "craftMaterialProcess" -> runGeneratedSurvivalProcessTask(client, "craftMaterialProcess", survivalCraftMaterialSteps(client, stepRequest));
@@ -4995,6 +5148,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "digProcess" -> runGeneratedSurvivalProcessTask(client, "digProcess", survivalDigSteps(client, stepRequest));
             case "buildProcess" -> runGeneratedSurvivalProcessTask(client, "buildProcess", survivalBuildSteps(client, stepRequest).steps());
             case "enchantPrepareProcess" -> runGeneratedSurvivalProcessTask(client, "enchantPrepareProcess", survivalEnchantSteps(client, stepRequest));
+            case "enchantApplyProcess" -> runGeneratedSurvivalProcessTask(client, "enchantApplyProcess", survivalEnchantApplySteps(client, stepRequest));
             case "lookAt" -> runActionLookAtTask(client, stepRequest);
             case "move" -> runActionMoveTask(stepRequest);
             case "goto" -> runActionGotoTask(client, stepRequest);
@@ -5435,6 +5589,55 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (moves.size() == 0) {
             root.addProperty("message", "No matching item slot was found for quick move.");
         }
+        return root;
+    }
+
+    private JsonObject runContainerClickRoleTask(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        MultiPlayerGameMode gameMode = client.gameMode;
+        if (player == null || gameMode == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        String role = getString(request, "role", "").trim();
+        int slot = semanticSlotIndex(player.containerMenu, role, getInt(request, "index", 0));
+        if (slot < 0 || slot >= player.containerMenu.slots.size()) {
+            JsonObject root = errorJson("RoleNotFound", "No slot role '" + role + "' was mapped for the current container.");
+            root.add("semantic", currentContainerSemanticJson(player));
+            return root;
+        }
+
+        int button = clamp(getInt(request, "button", 0), 0, 8);
+        ContainerInput input = parseContainerInput(getString(request, "mode", "pickup"));
+        gameMode.handleContainerInput(player.containerMenu.containerId, slot, button, input, player);
+        player.containerMenu.broadcastChanges();
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("role", role);
+        root.addProperty("slot", slot);
+        root.addProperty("button", button);
+        root.addProperty("mode", input.name().toLowerCase(Locale.ROOT));
+        root.add("semantic", currentContainerSemanticJson(player));
+        root.add("container", currentContainerJson(player));
+        return root;
+    }
+
+    private JsonObject runContainerButtonTask(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        MultiPlayerGameMode gameMode = client.gameMode;
+        if (player == null || gameMode == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        int buttonId = clamp(getInt(request, "buttonId", getInt(request, "button", 0)), 0, 128);
+        gameMode.handleInventoryButtonClick(player.containerMenu.containerId, buttonId);
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("buttonId", buttonId);
+        root.addProperty("containerId", player.containerMenu.containerId);
+        root.add("semantic", currentContainerSemanticJson(player));
+        root.add("container", currentContainerJson(player));
         return root;
     }
 
@@ -6366,6 +6569,124 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.add("carried", itemJson(menu.getCarried()));
         root.add("slots", containerSlotsJson(player, menu));
         return root;
+    }
+
+    private JsonObject currentContainerSemanticJson(LocalPlayer player) {
+        AbstractContainerMenu menu = player.containerMenu;
+        JsonObject root = new JsonObject();
+        String type = menuTypeName(menu);
+        root.addProperty("type", type);
+        root.addProperty("containerId", menu.containerId);
+        root.addProperty("slotCount", menu.slots.size());
+        root.add("roles", semanticRolesJson(menu));
+        root.add("playerInventory", playerInventorySlotRangesJson(player, menu));
+        root.addProperty("notes", "Use /container/clickRole with a role name, or /container/button for menu buttons such as enchant options.");
+        return root;
+    }
+
+    private JsonObject semanticRolesJson(AbstractContainerMenu menu) {
+        JsonObject roles = new JsonObject();
+        String type = menuTypeName(menu).toLowerCase(Locale.ROOT);
+        int size = menu.slots.size();
+
+        if (type.contains("furnace") || type.contains("smoker") || type.contains("blast")) {
+            addRole(roles, "input", 0, size);
+            addRole(roles, "fuel", 1, size);
+            addRole(roles, "result", 2, size);
+        } else if (type.contains("brewing")) {
+            addRole(roles, "bottle_0", 0, size);
+            addRole(roles, "bottle_1", 1, size);
+            addRole(roles, "bottle_2", 2, size);
+            addRole(roles, "ingredient", 3, size);
+            addRole(roles, "fuel", 4, size);
+        } else if (type.contains("anvil")) {
+            addRole(roles, "left", 0, size);
+            addRole(roles, "right", 1, size);
+            addRole(roles, "result", 2, size);
+        } else if (type.contains("enchant")) {
+            addRole(roles, "item", 0, size);
+            addRole(roles, "lapis", 1, size);
+            JsonArray buttons = new JsonArray();
+            buttons.add(buttonRoleJson("option_0", 0));
+            buttons.add(buttonRoleJson("option_1", 1));
+            buttons.add(buttonRoleJson("option_2", 2));
+            roles.add("buttons", buttons);
+        } else if (type.contains("merchant") || type.contains("trade")) {
+            addRole(roles, "buy_a", 0, size);
+            addRole(roles, "buy_b", 1, size);
+            addRole(roles, "result", 2, size);
+            JsonArray buttons = new JsonArray();
+            for (int i = 0; i < 16; i++) {
+                buttons.add(buttonRoleJson("trade_" + i, i));
+            }
+            roles.add("buttons", buttons);
+        } else if (type.contains("crafting")) {
+            addRole(roles, "result", 0, size);
+            for (int i = 1; i <= 9; i++) {
+                addRole(roles, "grid_" + i, i, size);
+            }
+        } else if (type.contains("inventory")) {
+            addRole(roles, "craft_result", 0, size);
+            addRole(roles, "craft_1", 1, size);
+            addRole(roles, "craft_2", 2, size);
+            addRole(roles, "craft_3", 3, size);
+            addRole(roles, "craft_4", 4, size);
+        }
+
+        return roles;
+    }
+
+    private JsonObject playerInventorySlotRangesJson(LocalPlayer player, AbstractContainerMenu menu) {
+        JsonObject root = new JsonObject();
+        JsonArray hotbar = new JsonArray();
+        JsonArray main = new JsonArray();
+        for (int i = 0; i < menu.slots.size(); i++) {
+            Slot slot = menu.getSlot(i);
+            if (slot.container != player.getInventory()) {
+                continue;
+            }
+            JsonObject entry = new JsonObject();
+            entry.addProperty("menuSlot", i);
+            entry.addProperty("inventoryIndex", slot.index);
+            if (slot.index >= 0 && slot.index < 9) {
+                hotbar.add(entry);
+            } else {
+                main.add(entry);
+            }
+        }
+        root.add("hotbar", hotbar);
+        root.add("main", main);
+        return root;
+    }
+
+    private void addRole(JsonObject roles, String role, int slot, int size) {
+        if (slot >= 0 && slot < size) {
+            roles.addProperty(role, slot);
+        }
+    }
+
+    private JsonObject buttonRoleJson(String role, int buttonId) {
+        JsonObject root = new JsonObject();
+        root.addProperty("role", role);
+        root.addProperty("buttonId", buttonId);
+        return root;
+    }
+
+    private int semanticSlotIndex(AbstractContainerMenu menu, String role, int index) {
+        JsonObject roles = semanticRolesJson(menu);
+        String key = role == null ? "" : role.trim();
+        if (roles.has(key) && roles.get(key).isJsonPrimitive()) {
+            return roles.get(key).getAsInt();
+        }
+        if ("bottle".equals(key)) {
+            String bottleKey = "bottle_" + clamp(index, 0, 2);
+            return roles.has(bottleKey) ? roles.get(bottleKey).getAsInt() : -1;
+        }
+        if ("grid".equals(key)) {
+            String gridKey = "grid_" + clamp(index, 1, 9);
+            return roles.has(gridKey) ? roles.get(gridKey).getAsInt() : -1;
+        }
+        return -1;
     }
 
     private JsonArray containerSlotsJson(LocalPlayer player, AbstractContainerMenu menu) {
@@ -7552,6 +7873,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private boolean pickupMode;
         private int attacksRemaining;
         private int pathIndex;
+        private double bestProgressDistance;
+        private long lastProgressAtMs;
+        private boolean stuck;
+        private String stuckReason;
 
         private ActionState(
             ActionKind kind,
@@ -7581,6 +7906,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
             this.pickupMode = false;
             this.attacksRemaining = attacksRemaining;
             this.pathIndex = 0;
+            this.bestProgressDistance = Double.MAX_VALUE;
+            this.lastProgressAtMs = this.startedAtMs;
+            this.stuck = false;
+            this.stuckReason = "";
         }
 
         static ActionState idle(String message) {
@@ -7625,6 +7954,33 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         void advancePathIndex() {
             pathIndex++;
+            bestProgressDistance = Double.MAX_VALUE;
+            lastProgressAtMs = System.currentTimeMillis();
+            stuck = false;
+            stuckReason = "";
+        }
+
+        long startedAtMs() {
+            return startedAtMs;
+        }
+
+        void observeProgress(double distance, String reason, long timeoutMs) {
+            long now = System.currentTimeMillis();
+            if (distance + 0.05D < bestProgressDistance) {
+                bestProgressDistance = distance;
+                lastProgressAtMs = now;
+                stuck = false;
+                stuckReason = "";
+                return;
+            }
+            if (now - lastProgressAtMs > timeoutMs) {
+                markStuck(reason);
+            }
+        }
+
+        void markStuck(String reason) {
+            this.stuck = true;
+            this.stuckReason = reason == null ? "stuck" : reason;
         }
 
         BlockPos lookTarget() {
@@ -7681,6 +8037,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             root.addProperty("message", message);
             root.addProperty("startedAtMs", startedAtMs);
             root.addProperty("running", kind != ActionKind.IDLE);
+            root.addProperty("stuck", stuck);
+            root.addProperty("stuckReason", stuckReason);
+            if (stuck) {
+                root.addProperty("recoveryHint", "Call /survival/recover or /survival/advancedPath with start:true.");
+            }
 
             if (kind == ActionKind.MANUAL) {
                 root.addProperty("untilMs", untilMs);

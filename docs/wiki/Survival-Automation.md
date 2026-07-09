@@ -15,8 +15,9 @@ array by default and execute only when `{"start":true}` is included.
 | `POST /survival/dig` | Implemented | Bounded block-by-block pit/hole mining. |
 | `POST /survival/build` | Implemented | Basic house plan. |
 | `POST /survival/enchant` | Implemented | Enchanting readiness and table-opening chain. |
+| `POST /survival/enchantApply` | v0.3 | Put item/lapis, press enchant option, take item back. |
 
-## Expanded v0.2 Interfaces
+## Expanded v0.3 Interfaces
 
 | Endpoint | Status | Purpose |
 |---|---|---|
@@ -33,10 +34,12 @@ array by default and execute only when `{"start":true}` is included.
 | `POST /survival/placeWorkstation` | Base process | Place/open common workstation blocks. |
 | `POST /survival/dimension` | Base process | Nether portal frame planning and ignition interaction. |
 | `POST /survival/redstone` | Template | Simple redstone line/lever template. |
-| `POST /survival/trade` | UI open | Walk to/open villager trade UI; exact trade selection uses container APIs. |
+| `POST /survival/trade` | UI open | Walk to/open villager trade UI. |
+| `POST /survival/tradeSelect` | v0.3 | Select trade button, quick-move payment, take result. |
 | `POST /survival/fish` | Base process | Select rod, cast, wait, reel. |
 | `POST /survival/brew` | UI process | Open brewing stand, quick-move fuel/bottles/ingredient, wait, take result. |
-| `POST /survival/anvil` | UI open | Place/open anvil; repair/name uses container APIs. |
+| `POST /survival/anvil` | UI open | Place/open anvil. |
+| `POST /survival/anvilApply` | v0.3 | Put left/right items and take anvil result when available. |
 | `POST /survival/explore` | Base process | Generate waypoint exploration route. |
 | `POST /storage/organize` | Base process | Open chest/container and quick-move selected item IDs. |
 | `POST /build/template` | Template | House, farm, mine-stairs, portal, redstone-line templates. |
@@ -55,6 +58,6 @@ curl -X POST http://127.0.0.1:8765/survival/smelt \
 - `start:false` or omitted means preview only.
 - `start:true` starts a task; poll `/task/status`.
 - UI-heavy actions such as enchanting, trading, anvil, and brewing expose the
-  real container/screen so the LLM can inspect and continue with lower-level
-  click/transfer interfaces.
-
+  real container/screen. v0.3 adds `/container/semantic`,
+  `/container/clickRole`, and `/container/button` so LLMs can use role names
+  instead of guessing raw slot numbers.

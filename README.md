@@ -79,6 +79,9 @@ The mod starts a local HTTP server when the Minecraft client starts:
 - `POST http://127.0.0.1:8765/inventory/drop`
 - `GET http://127.0.0.1:8765/container`
 - `POST http://127.0.0.1:8765/container/transfer`
+- `GET http://127.0.0.1:8765/container/semantic`
+- `POST http://127.0.0.1:8765/container/clickRole`
+- `POST http://127.0.0.1:8765/container/button`
 - `GET/POST http://127.0.0.1:8765/craft/check`
 - `GET http://127.0.0.1:8765/survival/status`
 - `GET/POST http://127.0.0.1:8765/survival/missing`
@@ -88,6 +91,7 @@ The mod starts a local HTTP server when the Minecraft client starts:
 - `POST http://127.0.0.1:8765/survival/dig`
 - `POST http://127.0.0.1:8765/survival/build`
 - `POST http://127.0.0.1:8765/survival/enchant`
+- `POST http://127.0.0.1:8765/survival/enchantApply`
 - `POST http://127.0.0.1:8765/survival/advancedPath`
 - `POST http://127.0.0.1:8765/survival/recover`
 - `POST http://127.0.0.1:8765/survival/smelt`
@@ -102,9 +106,11 @@ The mod starts a local HTTP server when the Minecraft client starts:
 - `POST http://127.0.0.1:8765/survival/dimension`
 - `POST http://127.0.0.1:8765/survival/redstone`
 - `POST http://127.0.0.1:8765/survival/trade`
+- `POST http://127.0.0.1:8765/survival/tradeSelect`
 - `POST http://127.0.0.1:8765/survival/fish`
 - `POST http://127.0.0.1:8765/survival/brew`
 - `POST http://127.0.0.1:8765/survival/anvil`
+- `POST http://127.0.0.1:8765/survival/anvilApply`
 - `POST http://127.0.0.1:8765/survival/explore`
 - `GET/POST http://127.0.0.1:8765/craft/tree`
 - `POST http://127.0.0.1:8765/storage/organize`
@@ -119,7 +125,7 @@ The mod starts a local HTTP server when the Minecraft client starts:
 The final jar is in:
 
 ```text
-finalMod/playerprobe-1.0.0-v0.2.jar
+finalMod/playerprobe-1.0.0-v0.3.jar
 ```
 
 Put that jar into:
@@ -247,9 +253,19 @@ curl -X POST http://127.0.0.1:8765/inventory/open
 
 curl http://127.0.0.1:8765/container
 
+curl http://127.0.0.1:8765/container/semantic
+
 curl -X POST http://127.0.0.1:8765/inventory/click \
   -H 'Content-Type: application/json' \
   -d '{"slot":10,"button":0,"mode":"pickup"}'
+
+curl -X POST http://127.0.0.1:8765/container/clickRole \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"result","mode":"quick_move"}'
+
+curl -X POST http://127.0.0.1:8765/container/button \
+  -H 'Content-Type: application/json' \
+  -d '{"buttonId":0}'
 
 curl -X POST http://127.0.0.1:8765/container/transfer \
   -H 'Content-Type: application/json' \
@@ -299,6 +315,10 @@ curl -X POST http://127.0.0.1:8765/survival/enchant \
   -H 'Content-Type: application/json' \
   -d '{"requiredLevel":1,"radius":16,"start":false}'
 
+curl -X POST http://127.0.0.1:8765/survival/enchantApply \
+  -H 'Content-Type: application/json' \
+  -d '{"itemId":"minecraft:iron_pickaxe","option":0,"start":false}'
+
 curl -X POST http://127.0.0.1:8765/survival/smelt \
   -H 'Content-Type: application/json' \
   -d '{"inputItemId":"minecraft:raw_iron","fuelItemId":"minecraft:coal","count":1,"start":true}'
@@ -339,7 +359,7 @@ Process notes:
 - Key single-action write endpoints now also return `steps` and `verify` fields so the caller can reason about process and result instead of only success/failure.
 - `task/start` now creates a tracked task with `taskId`, `currentStepIndex`, `results`, and final `snapshot` state.
 - `task/status` can be polled while a longer player-like process is running, and now reports whether the current step has started, whether it is waiting for an in-progress action, and the live `currentActionState`.
-- `task/start` also supports process-oriented helper steps such as `retry`, `if`, `repeat`, `breakIf`, `wait`, `waitForScreen`, `waitForActionIdle`, `verifyBlock`, `verifyInventoryItem`, `verifyScreen`, `verifyContainer`, `selectHotbar`, `equipBest`, `openInventory`, `inventoryClick`, `containerTransfer`, `containerQuickMoveItem`, `refillHotbar`, `openNearbyCraftingTable`, `openNearbyContainer`, `containerTransferProcess`, `containerTransferProcessAutoRepair`, `craftInventoryProcess`, `craftInventoryProcessAutoRepair`, `craftTableProcess`, `craftTableProcessAutoRepair`, `advancedPathProcess`, `recoverProcess`, `smeltProcess`, `storageOrganizeProcess`, `buildTemplateProcess`, `experienceProcess`, `combatProcess`, `farmProcess`, `mineProcess`, `lightProcess`, `sleepProcess`, `placeWorkstationProcess`, `dimensionProcess`, `redstoneProcess`, `tradeProcess`, `fishProcess`, `brewProcess`, `anvilProcess`, `exploreProcess`, `craftToolProcess`, `craftMaterialProcess`, `chopTreeProcess`, `digProcess`, `buildProcess`, and `enchantPrepareProcess`.
+- `task/start` also supports process-oriented helper steps such as `retry`, `if`, `repeat`, `breakIf`, `wait`, `waitForScreen`, `waitForActionIdle`, `verifyBlock`, `verifyInventoryItem`, `verifyScreen`, `verifyContainer`, `selectHotbar`, `equipBest`, `openInventory`, `inventoryClick`, `containerTransfer`, `containerQuickMoveItem`, `containerClickRole`, `containerButton`, `refillHotbar`, `openNearbyCraftingTable`, `openNearbyContainer`, `containerTransferProcess`, `containerTransferProcessAutoRepair`, `craftInventoryProcess`, `craftInventoryProcessAutoRepair`, `craftTableProcess`, `craftTableProcessAutoRepair`, `advancedPathProcess`, `recoverProcess`, `smeltProcess`, `storageOrganizeProcess`, `buildTemplateProcess`, `experienceProcess`, `combatProcess`, `farmProcess`, `mineProcess`, `lightProcess`, `sleepProcess`, `placeWorkstationProcess`, `dimensionProcess`, `redstoneProcess`, `tradeProcess`, `tradeSelectProcess`, `fishProcess`, `brewProcess`, `anvilProcess`, `anvilApplyProcess`, `exploreProcess`, `craftToolProcess`, `craftMaterialProcess`, `chopTreeProcess`, `digProcess`, `buildProcess`, `enchantPrepareProcess`, and `enchantApplyProcess`.
 - `/survival/*` endpoints are higher-level survival planners. They return material checks plus executable task steps by default; pass `{"start":true}` to execute the generated player-like task immediately.
 - `/survival/chopTree` finds a nearby vanilla log/stem, walks to it, equips the best mining tool, mines vertical logs one by one, waits for each break, verifies air, and picks up drops.
 - `/survival/craftTool` and `/survival/craftMaterial` generate inventory/workbench crafting chains, including basic prerequisite steps such as planks, sticks, crafting table crafting, and crafting table placement when needed.
@@ -347,6 +367,9 @@ Process notes:
 - `/survival/build` generates a basic house placement plan with floor, walls, doorway, and optional roof, plus missing-block analysis.
 - `/survival/enchant` exposes experience/lapis/table checks and a preparation chain for opening a nearby or placed enchanting table. Final option selection can be completed with the lower-level container interfaces after the screen is open.
 - `/survival/smelt`, `/survival/brew`, `/survival/anvil`, `/survival/trade`, and `/storage/organize` use the real container UI plus quick-move/click primitives. Exact slot choice remains visible to the LLM through `/container`.
+- `/container/semantic`, `/container/clickRole`, and `/container/button` expose UI-specific role maps and menu-button operations for furnace, brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.
+- `/survival/enchantApply`, `/survival/tradeSelect`, and `/survival/anvilApply` use those semantic UI controls to perform the most common final UI actions.
+- `action/status` now includes `stuck`, `stuckReason`, and `recoveryHint` fields for long-running path/mine diagnostics.
 - `/build/template` adds house, farm, mine-stairs, portal, and redstone-line templates; `/build/refillHotbar` exposes build-material hotbar refill.
 - `/survival/advancedPath` adds recovery/mining/bridging-style fallback planning around the conservative pathfinder. It still avoids teleporting or direct world mutation.
 - `/survival/decision` is a decision-only endpoint that ranks immediate survival priorities for the LLM.

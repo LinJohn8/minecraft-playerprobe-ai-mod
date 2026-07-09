@@ -64,6 +64,8 @@ GET /task/status
 | `inventoryClick` | Low-level click. |
 | `containerTransfer` | Quick-move from a slot. |
 | `containerQuickMoveItem` | Quick-move by item id. |
+| `containerClickRole` | Click or quick-move a semantic UI role. |
+| `containerButton` | Press a menu button. |
 | `refillHotbar` | Swap inventory item into hotbar. |
 | `openNearbyContainer` | Walk/open nearby container-like block. |
 | `containerTransferProcess` | Open nearby container and transfer. |
@@ -84,6 +86,7 @@ GET /task/status
 | `digProcess` | Generate digging chain. |
 | `buildProcess` | Generate basic build chain. |
 | `enchantPrepareProcess` | Generate enchanting-table preparation chain. |
+| `enchantApplyProcess` | Put enchanting inputs, press option button, take item. |
 | `advancedPathProcess` | Generate advanced path fallback chain. |
 | `recoverProcess` | Generate recovery chain. |
 | `smeltProcess` | Generate furnace smelting chain. |
@@ -99,8 +102,9 @@ GET /task/status
 | `dimensionProcess` | Generate dimension/portal chain. |
 | `redstoneProcess` | Generate redstone template chain. |
 | `tradeProcess` | Generate villager UI opening chain. |
+| `tradeSelectProcess` | Select villager trade and take result if possible. |
 | `fishProcess` | Generate fishing chain. |
 | `brewProcess` | Generate brewing stand chain. |
 | `anvilProcess` | Generate anvil opening chain. |
+| `anvilApplyProcess` | Put anvil inputs and take result if possible. |
 | `exploreProcess` | Generate waypoint exploration chain. |
-

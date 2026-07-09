@@ -1,6 +1,6 @@
 # PlayerProbe Wiki
 
-PlayerProbe is a client-only Fabric mod for Minecraft `26.1.2-Fabric`.
+PlayerProbe v0.3 is a client-only Fabric mod for Minecraft `26.1.2-Fabric`.
 It exposes a local HTTP interface at `http://127.0.0.1:8765` so an LLM or
 external agent can observe the player, reason about state, and execute
 player-like process chains.
@@ -17,7 +17,7 @@ player-like process chains.
 The generated mod jar is:
 
 ```text
-finalMod/playerprobe-1.0.0-v0.2.jar
+finalMod/playerprobe-1.0.0-v0.3.jar
 ```
 
 Install it into:
@@ -31,4 +31,3 @@ Install it into:
 PlayerProbe prefers real player-like progression over direct world mutation.
 Most high-level endpoints return executable `steps` first. Pass
 `{"start":true}` to start the generated task and then poll `/task/status`.
-

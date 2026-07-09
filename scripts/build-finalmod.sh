@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MC_DIR="${MC_DIR:-$HOME/Library/Application Support/minecraft/versions/26.1.2-Fabric}"
 LIB_DIR="${LIB_DIR:-$HOME/Library/Application Support/minecraft/libraries}"
 JAVA_HOME="${JAVA_HOME:-$HOME/Library/Java/JavaVirtualMachines/mojang-25.0.1.bundle/Contents/Home}"
-MOD_VERSION="${MOD_VERSION:-1.0.0-v0.2}"
+MOD_VERSION="${MOD_VERSION:-1.0.0-v0.3}"
 MOD_NAME="playerprobe-${MOD_VERSION}.jar"
 
 cd "$PROJECT_DIR"

@@ -73,6 +73,9 @@ http://127.0.0.1:8765
 | `POST /inventory/drop` | Drop item(s). |
 | `GET /container` | Read current container slots. |
 | `POST /container/transfer` | Quick-move from a slot. |
+| `GET /container/semantic` | Read UI role-to-slot/button map. |
+| `POST /container/clickRole` | Click or quick-move a semantic slot role. |
+| `POST /container/button` | Press a menu button such as enchant/trade option. |
 | `GET /recipes` | List recipes for an item. |
 | `GET/POST /craft/check` | Check craftability and menu type. |
 | `POST /craft` | Execute player-like crafting. |
@@ -85,4 +88,3 @@ http://127.0.0.1:8765
 | `POST /task/start` | Start a multi-step process. |
 | `GET /task/status` | Poll task progress and results. |
 | `GET/POST /task/cancel` | Cancel the task. |
-
