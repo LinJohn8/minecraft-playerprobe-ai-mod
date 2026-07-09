@@ -4,3 +4,5 @@ build/
 out/
 *.class
 *.log
+docs/wiki/
+scripts/sync-wiki.sh

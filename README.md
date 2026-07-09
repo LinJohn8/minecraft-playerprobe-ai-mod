@@ -6,12 +6,8 @@
 
 Client-only Fabric mod for Minecraft `26.1.2-Fabric`.
 
-Project wiki source pages are kept in `docs/wiki/`. If the GitHub Wiki has
-already been initialized from the web UI, sync them with:
-
-```bash
-./scripts/sync-wiki.sh
-```
+Project wiki source pages are kept locally in `docs/wiki/` and are intentionally
+not tracked or pushed to GitHub.
 
 ## Support
 
@@ -82,6 +78,7 @@ The mod starts a local HTTP server when the Minecraft client starts:
 - `GET http://127.0.0.1:8765/container/semantic`
 - `POST http://127.0.0.1:8765/container/clickRole`
 - `POST http://127.0.0.1:8765/container/button`
+- `POST http://127.0.0.1:8765/container/text`
 - `GET/POST http://127.0.0.1:8765/craft/check`
 - `GET http://127.0.0.1:8765/survival/status`
 - `GET/POST http://127.0.0.1:8765/survival/missing`
@@ -116,6 +113,7 @@ The mod starts a local HTTP server when the Minecraft client starts:
 - `POST http://127.0.0.1:8765/storage/organize`
 - `POST http://127.0.0.1:8765/build/template`
 - `POST http://127.0.0.1:8765/build/refillHotbar`
+- `GET/POST http://127.0.0.1:8765/explore/markers`
 - `GET http://127.0.0.1:8765/screen/status`
 - `POST http://127.0.0.1:8765/screen/close`
 - `GET http://127.0.0.1:8765/events?since=0`
@@ -360,7 +358,7 @@ Process notes:
 - `task/start` now creates a tracked task with `taskId`, `currentStepIndex`, `results`, and final `snapshot` state.
 - `task/status` can be polled while a longer player-like process is running, and now reports whether the current step has started, whether it is waiting for an in-progress action, and the live `currentActionState`.
 - `task/start` supports stuck auto-recovery with `autoRecoverStuck` and `maxAutoRecoveries`; it records inserted recovery/retry steps in task results instead of hiding them from the LLM.
-- `task/start` also supports process-oriented helper steps such as `retry`, `if`, `repeat`, `breakIf`, `wait`, `waitForScreen`, `waitForActionIdle`, `verifyBlock`, `verifyInventoryItem`, `verifyScreen`, `verifyContainer`, `selectHotbar`, `equipBest`, `openInventory`, `inventoryClick`, `containerTransfer`, `containerQuickMoveItem`, `containerClickRole`, `containerButton`, `refillHotbar`, `openNearbyCraftingTable`, `openNearbyContainer`, `containerTransferProcess`, `containerTransferProcessAutoRepair`, `craftInventoryProcess`, `craftInventoryProcessAutoRepair`, `craftTableProcess`, `craftTableProcessAutoRepair`, `advancedPathProcess`, `recoverProcess`, `smeltProcess`, `storageOrganizeProcess`, `buildTemplateProcess`, `experienceProcess`, `combatProcess`, `farmProcess`, `mineProcess`, `lightProcess`, `sleepProcess`, `placeWorkstationProcess`, `dimensionProcess`, `redstoneProcess`, `tradeProcess`, `tradeSelectProcess`, `fishProcess`, `brewProcess`, `anvilProcess`, `anvilApplyProcess`, `exploreProcess`, `craftToolProcess`, `craftMaterialProcess`, `chopTreeProcess`, `digProcess`, `buildProcess`, `enchantPrepareProcess`, and `enchantApplyProcess`.
+- `task/start` also supports process-oriented helper steps such as `retry`, `if`, `repeat`, `breakIf`, `wait`, `waitForScreen`, `waitForActionIdle`, `verifyBlock`, `verifyInventoryItem`, `verifyScreen`, `verifyContainer`, `selectHotbar`, `equipBest`, `openInventory`, `inventoryClick`, `containerTransfer`, `containerQuickMoveItem`, `containerClickRole`, `containerButton`, `containerText`, `recordExploreMarker`, `refillHotbar`, `openNearbyCraftingTable`, `openNearbyContainer`, `containerTransferProcess`, `containerTransferProcessAutoRepair`, `craftInventoryProcess`, `craftInventoryProcessAutoRepair`, `craftTableProcess`, `craftTableProcessAutoRepair`, `advancedPathProcess`, `recoverProcess`, `smeltProcess`, `storageOrganizeProcess`, `buildTemplateProcess`, `experienceProcess`, `combatProcess`, `farmProcess`, `mineProcess`, `lightProcess`, `sleepProcess`, `placeWorkstationProcess`, `dimensionProcess`, `redstoneProcess`, `tradeProcess`, `tradeSelectProcess`, `fishProcess`, `brewProcess`, `anvilProcess`, `anvilApplyProcess`, `exploreProcess`, `craftToolProcess`, `craftMaterialProcess`, `chopTreeProcess`, `digProcess`, `buildProcess`, `enchantPrepareProcess`, and `enchantApplyProcess`.
 - `/survival/*` endpoints are higher-level survival planners. They return material checks plus executable task steps by default; pass `{"start":true}` to execute the generated player-like task immediately.
 - `/survival/chopTree` finds a nearby vanilla log/stem, walks to it, equips the best mining tool, mines vertical logs one by one, waits for each break, verifies air, and picks up drops.
 - `/survival/craftTool` and `/survival/craftMaterial` generate inventory/workbench crafting chains, including basic prerequisite steps such as planks, sticks, crafting table crafting, and crafting table placement when needed.
@@ -368,12 +366,13 @@ Process notes:
 - `/survival/build` generates a basic house placement plan with floor, walls, doorway, and optional roof, plus missing-block analysis.
 - `/survival/enchant` exposes experience/lapis/table checks and a preparation chain for opening a nearby or placed enchanting table. Final option selection can be completed with the lower-level container interfaces after the screen is open.
 - `/survival/smelt`, `/survival/brew`, `/survival/anvil`, `/survival/trade`, and `/storage/organize` use the real container UI plus quick-move/click primitives. Exact slot choice remains visible to the LLM through `/container`.
-- `/container/semantic`, `/container/clickRole`, and `/container/button` expose UI-specific role maps, role slot item snapshots, screen/menu metadata, and menu-button operations for furnace, brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.
+- `/container/semantic`, `/container/clickRole`, `/container/button`, and `/container/text` expose UI-specific role maps, role slot item snapshots, screen/menu metadata, anvil rename text, enchant costs/clues, merchant trade metadata, and menu-button operations for furnace, brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.
 - `/survival/enchantApply`, `/survival/tradeSelect`, and `/survival/anvilApply` use those semantic UI controls to perform the most common final UI actions.
 - `action/status` now includes `stuck`, `stuckReason`, and `recoveryHint` fields for long-running path/mine diagnostics.
 - `/survival/missing` and `/craft/tree` now include broader common survival/building requirement guesses, including beds, doors, ladders, storage, furnaces, enchanting table/bookshelves, armor, bows, fishing rods, buckets, shield, and basic redstone parts.
-- `/build/template` adds house, farm, mine-stairs, portal, and redstone-line templates; `/build/refillHotbar` exposes build-material hotbar refill.
-- `/survival/advancedPath` adds recovery/mining/bridging-style fallback planning around the conservative pathfinder. It still avoids teleporting or direct world mutation.
+- `/build/template` adds house, starter-base, storage-room, animal-pen, crop-farm, mine-entrance, mine-stairs, portal, portal-room, watchtower, bridge, and redstone templates; `/build/refillHotbar` exposes build-material hotbar refill.
+- `/survival/advancedPath` adds recovery/mining/bridging/liquid-fill/vertical-assist fallback planning around the conservative pathfinder. It still avoids teleporting or direct world mutation.
+- `/explore/markers` exposes local exploration memory for waypoints and manually recorded positions.
 - `/survival/decision` is a decision-only endpoint that ranks immediate survival priorities for the LLM.
 - `action/planPath` and `action/findBlocks` expose richer path/block planning surfaces for LLM decision making without immediately mutating the world.
 - `inventory/knowledge`, `inventory/find`, and `craft/check` expose more decision-friendly summaries before taking action.

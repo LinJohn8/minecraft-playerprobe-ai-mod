@@ -57,6 +57,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - `containerQuickMoveItem`
   - `containerClickRole`
   - `containerButton`
+  - `containerText`
+  - `recordExploreMarker`
   - `refillHotbar`
 - Higher-level process helpers added:
   - `openNearbyCraftingTable`
@@ -97,6 +99,7 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/storage/organize`
   - `/build/template`
   - `/build/refillHotbar`
+  - `/explore/markers`
 - Survival task helpers added:
   - `chopTreeProcess`
   - `digProcess`
@@ -146,6 +149,9 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/survival/enchantApply`, `/survival/tradeSelect`, and
     `/survival/anvilApply` add common final UI action chains.
   - `action/status` now exposes `stuck`, `stuckReason`, and `recoveryHint`.
+  - `/container/semantic` now exposes enchant option costs/clues, merchant
+    trade offers, and anvil cost/rename readiness where available.
+  - `/container/text` supports vanilla anvil rename text.
 - v0.3 task hardening:
   - `/task/start` and survival `start:true` tasks support `autoRecoverStuck`
     and `maxAutoRecoveries`.
@@ -155,6 +161,19 @@ what still needs to be finished for the Minecraft AI player mod.
   - Requirement guesses now cover more common survival/building items such as
     beds, doors, ladders, storage, furnaces, enchanting table/bookshelves,
     armor, bows, fishing rods, buckets, shields, and basic redstone parts.
+  - Recipe ingredient extraction now uses vanilla placement info, improving
+    shapeless recipe trees.
+- v0.3 planning expansions:
+  - `/survival/advancedPath` now emits bounded terrain repair steps for gaps,
+    liquids, breakable obstruction, and vertical assist before retrying.
+  - `/build/template` includes starter base, storage room, animal pen, crop
+    farm, mine entrance, portal room, watchtower, bridge, repeater line,
+    redstone torch tower, and simple redstone clock templates.
+  - `/storage/organize` supports category-based transfer groups such as wood,
+    blocks, ores, food, tools, combat, and farming.
+  - `/survival/combat` supports optional shield bracing and kite/strafe steps.
+  - `/explore/markers` and `recordExploreMarker` provide local exploration
+    memory for waypoints.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.3.jar`
 
@@ -175,8 +194,9 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/craft/tree` now exposes a recursive recipe tree surface.
   - Common survival/building requirement guesses are broader, which improves
     `/survival/missing` and `/craft/tree` planning.
-  - Still needs stronger shapeless/special-recipe modeling and complete
-    dependency execution for every vanilla recipe.
+  - Shapeless ingredient extraction is improved through vanilla placement info.
+  - Still needs complete dependency execution for every vanilla recipe and
+    special recipe explanations where vanilla exposes no normal ingredients.
 - Inventory/container control:
   - Read, click, transfer, drop, select, equip are implemented.
   - High-level process wrappers now exist for nearby open + transfer.
@@ -184,8 +204,8 @@ what still needs to be finished for the Minecraft AI player mod.
     menu buttons now exist.
   - Semantic container output now includes screen/menu metadata and current
     role slot item snapshots.
-  - Still needs richer UI text/cost parsing for complex anvil/enchanting/trading
-    edge cases.
+  - Enchant costs/clues, merchant offers, and anvil cost/rename readiness are
+    exposed. Complex rendered text and some UI edge cases can still improve.
 
 ## Remaining Work
 
@@ -196,10 +216,11 @@ what still needs to be finished for the Minecraft AI player mod.
   - continue-style semantics
   - stateful loop conditions
 - Harden survival process chains:
-  - improve automatic recovery with stronger bridge/mine/swim/ladders handling
+  - improve automatic recovery with more obstacle-specific live diagnosis
   - stronger bridge/mine path repair for caves, water, ladders, ravines, and
     vertical shafts
-  - parse final enchantment/trading/anvil labels/costs after the screen opens
+  - parse final rendered enchantment/trading/anvil labels where vanilla only
+    exposes clues or screen text
 
 ### Medium Priority
 
@@ -208,13 +229,11 @@ what still needs to be finished for the Minecraft AI player mod.
 - Add more explicit verification payloads for all write operations.
 - Add recipe-depth explanation for more vanilla blocks/items beyond the current
   common survival tools/materials.
-- Add richer UI metadata extraction for brewing, trading, anvil, enchanting,
-  and villager professions.
+- Add richer UI metadata extraction for brewing and villager professions.
 
 ### Nice To Have
 
-- More building templates beyond house/farm/mine-stairs/portal/redstone-line.
-- Better recipe depth and dependency explanation.
+- Better recipe depth and dependency explanation for special recipes.
 - More menu/process helpers for create-world screen state introspection.
 
 ## Current Rule For Ongoing Work

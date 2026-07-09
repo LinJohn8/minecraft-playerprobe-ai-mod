@@ -51,11 +51,16 @@ import net.minecraft.world.item.crafting.display.RecipeDisplayEntry;
 import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractCraftingMenu;
+import net.minecraft.world.inventory.AnvilMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.CraftingMenu;
+import net.minecraft.world.inventory.EnchantmentMenu;
 import net.minecraft.world.inventory.FurnaceMenu;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.inventory.MerchantMenu;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.item.trading.MerchantOffer;
+import net.minecraft.world.item.trading.MerchantOffers;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.levelgen.WorldDimensions;
@@ -65,6 +70,7 @@ import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.LevelSummary;
+import net.minecraft.network.protocol.game.ServerboundRenameItemPacket;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
@@ -120,6 +126,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
     private volatile TaskState taskState = TaskState.idle();
     private final Object eventLock = new Object();
     private final ArrayDeque<JsonObject> recentEvents = new ArrayDeque<>();
+    private final Object explorationLock = new Object();
+    private final ArrayDeque<JsonObject> explorationMarkers = new ArrayDeque<>();
     private ObservationSnapshot lastObservation;
 
     @Override
@@ -184,6 +192,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/container/semantic", this::handleContainerSemantic);
             server.createContext("/container/clickRole", this::handleContainerClickRole);
             server.createContext("/container/button", this::handleContainerButton);
+            server.createContext("/container/text", this::handleContainerText);
             server.createContext("/craft/check", this::handleCraftCheck);
             server.createContext("/survival/status", this::handleSurvivalStatus);
             server.createContext("/survival/missing", this::handleSurvivalMissing);
@@ -218,6 +227,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/storage/organize", this::handleStorageOrganize);
             server.createContext("/build/template", this::handleBuildTemplate);
             server.createContext("/build/refillHotbar", this::handleBuildRefillHotbar);
+            server.createContext("/explore/markers", this::handleExploreMarkers);
             server.createContext("/screen/status", this::handleScreenStatus);
             server.createContext("/screen/close", this::handleScreenClose);
             server.createContext("/events", this::handleEvents);
@@ -1201,6 +1211,17 @@ public final class PlayerProbeClient implements ClientModInitializer {
         sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
+    private void handleContainerText(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> runContainerTextTask(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
     private void handleActionPlaceBlock(HttpExchange exchange) throws IOException {
         if (!isPost(exchange)) {
             sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
@@ -1549,6 +1570,21 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
     private void handleBuildRefillHotbar(HttpExchange exchange) throws IOException {
         handlePostPlanner(exchange, client -> request -> buildRefillHotbarPlan(client, request));
+    }
+
+    private void handleExploreMarkers(HttpExchange exchange) throws IOException {
+        if (isGet(exchange)) {
+            sendJson(exchange, 200, explorationMarkersJson());
+            return;
+        }
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only GET or POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> recordExploreMarker(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
     private void handlePostPlanner(HttpExchange exchange, Function<Minecraft, Function<JsonObject, JsonObject>> plannerFactory) throws IOException {
@@ -3481,7 +3517,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
         JsonObject detail = new JsonObject();
         detail.addProperty("leftItemId", normalizeItemId(getString(request, "leftItemId", getString(request, "itemId", ""))));
         detail.addProperty("rightItemId", normalizeItemId(getString(request, "rightItemId", getString(request, "materialItemId", ""))));
-        detail.addProperty("notes", "Opens/places anvil, quick-moves left/right items, and quick-moves the result. Rename text still needs UI text support.");
+        detail.addProperty("renameText", getString(request, "renameText", getString(request, "name", "")));
+        detail.addProperty("notes", "Opens/places anvil, quick-moves left/right items, optionally sends vanilla rename text, and quick-moves the result.");
         return survivalPlanResponse(client, request, "anvilApply", survivalAnvilApplySteps(client, request), detail);
     }
 
@@ -3897,6 +3934,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (getBoolean(request, "recoverFirst", true)) {
             steps.addAll(survivalRecoverSteps(client, request));
         }
+        if (getBoolean(request, "allowTerrainRepair", true)) {
+            steps.addAll(terrainRepairTowardSteps(level, player.blockPosition(), target, request));
+        }
         if (getBoolean(request, "allowBreak", true)) {
             steps.addAll(lineMineTowardSteps(level, player.blockPosition(), target, clamp(getInt(request, "breakLimit", 12), 1, 64)));
         }
@@ -3970,7 +4010,13 @@ public final class PlayerProbeClient implements ClientModInitializer {
         steps.add(open);
         steps.add(waitForActionIdleStep(20000));
         boolean pull = "pull".equalsIgnoreCase(getString(request, "mode", "deposit"));
-        for (String itemId : itemIdsFromRequest(request, "itemIds", getString(request, "itemId", ""))) {
+        List<String> itemIds = new ArrayList<>(itemIdsFromRequest(request, "itemIds", getString(request, "itemId", "")));
+        itemIds.addAll(categoryItemIdsFromRequest(request));
+        Set<String> seen = new HashSet<>();
+        for (String itemId : itemIds) {
+            if (!seen.add(itemId)) {
+                continue;
+            }
             steps.add(quickMoveItemStep(itemId, clamp(getInt(request, "count", 1), 1, 64), pull, !pull));
         }
         if (getBoolean(request, "close", true)) {
@@ -3991,9 +4037,20 @@ public final class PlayerProbeClient implements ClientModInitializer {
             : player.blockPosition().relative(player.getDirection(), 3);
         List<BuildPlacement> placements = switch (template) {
             case "farm" -> farmTemplatePlacements(origin, normalizeItemId(getString(request, "blockId", "minecraft:farmland")));
+            case "crop_farm" -> cropFarmTemplatePlacements(origin, request);
+            case "animal_pen" -> animalPenTemplatePlacements(origin, request);
             case "mine_stairs", "mineshaft" -> mineStairTemplatePlacements(origin, normalizeItemId(getString(request, "blockId", "minecraft:cobblestone")));
+            case "mine_entrance" -> mineEntranceTemplatePlacements(origin, request);
             case "portal" -> netherPortalPlacements(origin);
+            case "portal_room" -> portalRoomTemplatePlacements(origin, request);
             case "redstone_line" -> redstoneLinePlacements(origin, clamp(getInt(request, "length", 8), 1, 32));
+            case "redstone_repeater_line" -> redstoneRepeaterLinePlacements(origin, request);
+            case "redstone_torch_tower" -> redstoneTorchTowerPlacements(origin, request);
+            case "redstone_clock" -> redstoneClockPlacements(origin, request);
+            case "storage_room" -> storageRoomTemplatePlacements(origin, request);
+            case "watchtower" -> watchtowerTemplatePlacements(origin, request);
+            case "bridge" -> bridgeTemplatePlacements(origin, request);
+            case "starter_base" -> starterBaseTemplatePlacements(origin, request);
             default -> houseTemplatePlacements(origin, request);
         };
 
@@ -4076,6 +4133,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
         JsonObject equip = taskStep("equipBest");
         equip.addProperty("purpose", "combat");
         steps.add(equip);
+        if (getBoolean(request, "useShield", true) && inventoryCount(player.getInventory(), "minecraft:shield") > 0) {
+            JsonObject shield = taskStep("useItem");
+            shield.addProperty("hand", "off");
+            steps.add(shield);
+            JsonObject brace = taskStep("wait");
+            brace.addProperty("durationMs", clamp(getInt(request, "shieldMs", 400), 100, 3000));
+            steps.add(brace);
+        }
         JsonObject go = taskStep("goto");
         BlockPos near = target.blockPosition();
         go.addProperty("x", near.getX());
@@ -4089,6 +4154,18 @@ public final class PlayerProbeClient implements ClientModInitializer {
         attack.addProperty("count", clamp(getInt(request, "hits", 3), 1, 20));
         steps.add(attack);
         steps.add(waitForActionIdleStep(15000));
+        if (getBoolean(request, "kite", false)) {
+            int moves = clamp(getInt(request, "kiteMoves", 2), 1, 8);
+            for (int i = 0; i < moves; i++) {
+                JsonObject strafe = taskStep("move");
+                strafe.addProperty(i % 2 == 0 ? "left" : "right", true);
+                strafe.addProperty("backward", true);
+                strafe.addProperty("sprint", true);
+                strafe.addProperty("durationMs", clamp(getInt(request, "kiteMoveMs", 450), 100, 2000));
+                steps.add(strafe);
+                steps.add(waitForActionIdleStep(2500));
+            }
+        }
         if (getBoolean(request, "retreatAfter", false)) {
             JsonObject back = taskStep("move");
             back.addProperty("backward", true);
@@ -4400,6 +4477,13 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (!right.isBlank()) {
             steps.add(quickMoveItemStep(right, 1, false, true));
         }
+        String renameText = getString(request, "renameText", getString(request, "name", ""));
+        if (!renameText.isBlank()) {
+            JsonObject text = taskStep("containerText");
+            text.addProperty("field", "name");
+            text.addProperty("text", renameText);
+            steps.add(text);
+        }
         JsonObject take = taskStep("containerClickRole");
         take.addProperty("role", "result");
         take.addProperty("mode", "quick_move");
@@ -4438,6 +4522,15 @@ public final class PlayerProbeClient implements ClientModInitializer {
             go.addProperty("radius", MAX_ACTION_RADIUS);
             steps.add(go);
             steps.add(waitForActionIdleStep(30000));
+            if (getBoolean(request, "recordMarkers", true)) {
+                JsonObject marker = taskStep("recordExploreMarker");
+                marker.addProperty("label", "waypoint_" + i);
+                marker.addProperty("x", point.getX());
+                marker.addProperty("y", point.getY());
+                marker.addProperty("z", point.getZ());
+                marker.addProperty("kind", "explore_waypoint");
+                steps.add(marker);
+            }
         }
         return steps;
     }
@@ -4480,6 +4573,57 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
         }
         return steps;
+    }
+
+    private List<JsonObject> terrainRepairTowardSteps(ClientLevel level, BlockPos start, BlockPos target, JsonObject request) {
+        List<JsonObject> steps = new ArrayList<>();
+        String bridgeBlock = normalizeItemId(getString(request, "bridgeBlockId", "minecraft:cobblestone"));
+        String ladderItem = normalizeItemId(getString(request, "ladderItemId", "minecraft:ladder"));
+        int limit = clamp(getInt(request, "repairLimit", 18), 1, 96);
+        BlockPos cursor = start;
+        int added = 0;
+        while (!cursor.equals(target) && added < limit) {
+            int dx = Integer.compare(target.getX(), cursor.getX());
+            int dz = Integer.compare(target.getZ(), cursor.getZ());
+            int dy = Integer.compare(target.getY(), cursor.getY());
+            BlockPos next = cursor.offset(dx, Math.abs(target.getY() - cursor.getY()) > 1 ? dy : 0, dz).immutable();
+            BlockPos floor = next.below();
+            BlockState feet = level.getBlockState(next);
+            BlockState head = level.getBlockState(next.above());
+
+            if (level.getBlockState(floor).isAir() || isLiquidBlock(level, floor)) {
+                steps.add(placeBlockStep(bridgeBlock, floor, "up"));
+                added++;
+            }
+            if (isLiquidBlock(level, next)) {
+                steps.add(placeBlockStep(bridgeBlock, next, "up"));
+                added++;
+            } else if (!feet.isAir()) {
+                steps.add(mineBlockStep(next));
+                steps.add(waitForActionIdleStep(20000));
+                added++;
+            }
+            if (!head.isAir() && !isLiquidBlock(level, next.above())) {
+                steps.add(mineBlockStep(next.above()));
+                steps.add(waitForActionIdleStep(20000));
+                added++;
+            }
+            if (dy > 0 && getBoolean(request, "allowVerticalAssist", true)) {
+                if (getBoolean(request, "preferLadders", false)) {
+                    steps.add(placeBlockStep(ladderItem, cursor.above(), Direction.NORTH.getName()));
+                } else {
+                    steps.add(placeBlockStep(bridgeBlock, cursor, "up"));
+                }
+                added++;
+            }
+            cursor = next;
+        }
+        return steps;
+    }
+
+    private boolean isLiquidBlock(ClientLevel level, BlockPos pos) {
+        String id = blockIdAt(level, pos);
+        return id.contains("water") || id.contains("lava") || !level.getBlockState(pos).getFluidState().isEmpty();
     }
 
     private void addWorkstationAccessSteps(List<JsonObject> steps, LocalPlayer player, ClientLevel level, String blockId, String itemId, boolean craftIfMissing) {
@@ -4550,7 +4694,61 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (ids.isEmpty() && !fallbackId.isBlank()) {
             ids.add(fallbackId);
         }
-        return ids.isEmpty() ? List.of("minecraft:cobblestone") : ids;
+        return ids;
+    }
+
+    private List<String> categoryItemIdsFromRequest(JsonObject request) {
+        List<String> ids = new ArrayList<>();
+        if (!request.has("categories") || !request.get("categories").isJsonArray()) {
+            return ids;
+        }
+        for (JsonElement element : request.getAsJsonArray("categories")) {
+            if (!element.isJsonPrimitive()) {
+                continue;
+            }
+            ids.addAll(storageCategoryItems(element.getAsString()));
+        }
+        return ids;
+    }
+
+    private List<String> storageCategoryItems(String rawCategory) {
+        String category = rawCategory == null ? "" : rawCategory.trim().toLowerCase(Locale.ROOT);
+        return switch (category) {
+            case "wood", "woods" -> {
+                List<String> ids = new ArrayList<>(logBlockIds());
+                ids.addAll(plankItemIds());
+                yield ids;
+            }
+            case "blocks", "building" -> List.of(
+                "minecraft:cobblestone", "minecraft:stone", "minecraft:dirt", "minecraft:gravel", "minecraft:sand",
+                "minecraft:oak_planks", "minecraft:spruce_planks", "minecraft:glass", "minecraft:stone_bricks"
+            );
+            case "ores", "metals" -> List.of(
+                "minecraft:coal", "minecraft:raw_iron", "minecraft:iron_ingot", "minecraft:raw_gold", "minecraft:gold_ingot",
+                "minecraft:raw_copper", "minecraft:copper_ingot", "minecraft:redstone", "minecraft:lapis_lazuli",
+                "minecraft:diamond", "minecraft:emerald", "minecraft:quartz"
+            );
+            case "food" -> List.of(
+                "minecraft:apple", "minecraft:bread", "minecraft:beef", "minecraft:cooked_beef", "minecraft:porkchop",
+                "minecraft:cooked_porkchop", "minecraft:chicken", "minecraft:cooked_chicken", "minecraft:carrot",
+                "minecraft:potato", "minecraft:baked_potato", "minecraft:wheat"
+            );
+            case "tools" -> List.of(
+                "minecraft:wooden_pickaxe", "minecraft:stone_pickaxe", "minecraft:iron_pickaxe", "minecraft:diamond_pickaxe",
+                "minecraft:wooden_axe", "minecraft:stone_axe", "minecraft:iron_axe", "minecraft:diamond_axe",
+                "minecraft:wooden_shovel", "minecraft:stone_shovel", "minecraft:iron_shovel", "minecraft:diamond_shovel",
+                "minecraft:shears", "minecraft:fishing_rod", "minecraft:flint_and_steel"
+            );
+            case "combat" -> List.of(
+                "minecraft:wooden_sword", "minecraft:stone_sword", "minecraft:iron_sword", "minecraft:diamond_sword",
+                "minecraft:bow", "minecraft:arrow", "minecraft:shield"
+            );
+            case "farm", "farming" -> List.of(
+                "minecraft:wheat_seeds", "minecraft:pumpkin_seeds", "minecraft:melon_seeds", "minecraft:beetroot_seeds",
+                "minecraft:wheat", "minecraft:carrot", "minecraft:potato", "minecraft:bone_meal"
+            );
+            default -> List.of();
+        };
     }
 
     private JsonObject decisionJson(String action, int priority, String reason) {
@@ -4663,6 +4861,131 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return placements;
     }
 
+    private List<BuildPlacement> starterBaseTemplatePlacements(BlockPos origin, JsonObject request) {
+        JsonObject house = request.deepCopy();
+        house.addProperty("width", clamp(getInt(request, "width", 7), 5, 16));
+        house.addProperty("depth", clamp(getInt(request, "depth", 7), 5, 16));
+        house.addProperty("height", clamp(getInt(request, "height", 3), 3, 8));
+        List<BuildPlacement> placements = new ArrayList<>(houseTemplatePlacements(origin, house));
+        placements.add(new BuildPlacement(origin.offset(3, 1, 0), "minecraft:oak_door"));
+        placements.add(new BuildPlacement(origin.offset(1, 1, 1), "minecraft:crafting_table"));
+        placements.add(new BuildPlacement(origin.offset(2, 1, 1), "minecraft:furnace"));
+        placements.add(new BuildPlacement(origin.offset(4, 1, 1), "minecraft:chest"));
+        placements.add(new BuildPlacement(origin.offset(5, 1, 1), "minecraft:white_bed"));
+        return placements;
+    }
+
+    private List<BuildPlacement> storageRoomTemplatePlacements(BlockPos origin, JsonObject request) {
+        JsonObject room = request.deepCopy();
+        room.addProperty("width", clamp(getInt(request, "width", 9), 5, 20));
+        room.addProperty("depth", clamp(getInt(request, "depth", 7), 5, 20));
+        room.addProperty("height", clamp(getInt(request, "height", 3), 3, 8));
+        List<BuildPlacement> placements = new ArrayList<>(houseTemplatePlacements(origin, room));
+        int chestRows = clamp(getInt(request, "chestRows", 2), 1, 4);
+        int chestCols = clamp(getInt(request, "chestCols", 4), 1, 8);
+        for (int row = 0; row < chestRows; row++) {
+            for (int col = 0; col < chestCols; col++) {
+                placements.add(new BuildPlacement(origin.offset(1 + col, 1, 1 + row * 2), "minecraft:chest"));
+            }
+        }
+        return placements;
+    }
+
+    private List<BuildPlacement> animalPenTemplatePlacements(BlockPos origin, JsonObject request) {
+        String fence = normalizeItemId(getString(request, "fenceBlockId", "minecraft:oak_fence"));
+        int width = clamp(getInt(request, "width", 9), 5, 32);
+        int depth = clamp(getInt(request, "depth", 9), 5, 32);
+        List<BuildPlacement> placements = new ArrayList<>();
+        for (int x = 0; x < width; x++) {
+            placements.add(new BuildPlacement(origin.offset(x, 0, 0), fence));
+            placements.add(new BuildPlacement(origin.offset(x, 0, depth - 1), fence));
+        }
+        for (int z = 1; z < depth - 1; z++) {
+            placements.add(new BuildPlacement(origin.offset(0, 0, z), fence));
+            placements.add(new BuildPlacement(origin.offset(width - 1, 0, z), fence));
+        }
+        placements.add(new BuildPlacement(origin.offset(width / 2, 0, 0), "minecraft:oak_fence_gate"));
+        placements.add(new BuildPlacement(origin.offset(1, 1, 1), "minecraft:torch"));
+        return placements;
+    }
+
+    private List<BuildPlacement> cropFarmTemplatePlacements(BlockPos origin, JsonObject request) {
+        List<BuildPlacement> placements = new ArrayList<>(farmTemplatePlacements(origin, "minecraft:farmland"));
+        String crop = normalizeItemId(getString(request, "cropItemId", "minecraft:wheat_seeds"));
+        for (int x = 0; x < 9; x++) {
+            for (int z = 0; z < 9; z++) {
+                if (x == 4 && z == 4) {
+                    continue;
+                }
+                placements.add(new BuildPlacement(origin.offset(x, 1, z), crop));
+            }
+        }
+        return placements;
+    }
+
+    private List<BuildPlacement> mineEntranceTemplatePlacements(BlockPos origin, JsonObject request) {
+        String support = normalizeItemId(getString(request, "supportBlockId", "minecraft:oak_log"));
+        String stair = normalizeItemId(getString(request, "stairBlockId", "minecraft:cobblestone"));
+        List<BuildPlacement> placements = new ArrayList<>();
+        for (int z = 0; z < 5; z++) {
+            placements.add(new BuildPlacement(origin.offset(-1, 1, z), support));
+            placements.add(new BuildPlacement(origin.offset(2, 1, z), support));
+            placements.add(new BuildPlacement(origin.offset(0, 3, z), support));
+            placements.add(new BuildPlacement(origin.offset(1, 3, z), support));
+        }
+        placements.addAll(mineStairTemplatePlacements(origin.offset(0, 0, 5), stair));
+        return placements;
+    }
+
+    private List<BuildPlacement> portalRoomTemplatePlacements(BlockPos origin, JsonObject request) {
+        JsonObject room = request.deepCopy();
+        room.addProperty("width", 7);
+        room.addProperty("depth", 5);
+        room.addProperty("height", 4);
+        room.addProperty("wallBlockId", normalizeItemId(getString(request, "wallBlockId", "minecraft:stone_bricks")));
+        List<BuildPlacement> placements = new ArrayList<>(houseTemplatePlacements(origin, room));
+        placements.addAll(netherPortalPlacements(origin.offset(2, 1, 2)));
+        return placements;
+    }
+
+    private List<BuildPlacement> watchtowerTemplatePlacements(BlockPos origin, JsonObject request) {
+        String block = normalizeItemId(getString(request, "blockId", "minecraft:cobblestone"));
+        int height = clamp(getInt(request, "height", 8), 4, 24);
+        List<BuildPlacement> placements = new ArrayList<>();
+        for (int y = 0; y < height; y++) {
+            placements.add(new BuildPlacement(origin.offset(0, y, 0), block));
+            placements.add(new BuildPlacement(origin.offset(3, y, 0), block));
+            placements.add(new BuildPlacement(origin.offset(0, y, 3), block));
+            placements.add(new BuildPlacement(origin.offset(3, y, 3), block));
+            if (y % 3 == 1) {
+                placements.add(new BuildPlacement(origin.offset(1, y, 1), "minecraft:ladder"));
+            }
+        }
+        for (int x = 0; x < 4; x++) {
+            for (int z = 0; z < 4; z++) {
+                placements.add(new BuildPlacement(origin.offset(x, height, z), block));
+            }
+        }
+        placements.add(new BuildPlacement(origin.offset(1, height + 1, 1), "minecraft:torch"));
+        return placements;
+    }
+
+    private List<BuildPlacement> bridgeTemplatePlacements(BlockPos origin, JsonObject request) {
+        String deck = normalizeItemId(getString(request, "blockId", "minecraft:oak_planks"));
+        String rail = normalizeItemId(getString(request, "railBlockId", "minecraft:oak_fence"));
+        int length = clamp(getInt(request, "length", 12), 2, 64);
+        int width = clamp(getInt(request, "width", 3), 1, 7);
+        List<BuildPlacement> placements = new ArrayList<>();
+        for (int z = 0; z < length; z++) {
+            for (int x = 0; x < width; x++) {
+                placements.add(new BuildPlacement(origin.offset(x, 0, z), deck));
+            }
+            placements.add(new BuildPlacement(origin.offset(-1, 1, z), rail));
+            placements.add(new BuildPlacement(origin.offset(width, 1, z), rail));
+        }
+        return placements;
+    }
+
     private List<BuildPlacement> mineStairTemplatePlacements(BlockPos origin, String blockId) {
         List<BuildPlacement> placements = new ArrayList<>();
         for (int i = 0; i < 16; i++) {
@@ -4693,6 +5016,41 @@ public final class PlayerProbeClient implements ClientModInitializer {
         for (int i = 1; i <= length; i++) {
             placements.add(new BuildPlacement(origin.offset(i, 0, 0), "minecraft:redstone"));
         }
+        return placements;
+    }
+
+    private List<BuildPlacement> redstoneRepeaterLinePlacements(BlockPos origin, JsonObject request) {
+        int length = clamp(getInt(request, "length", 12), 2, 64);
+        int spacing = clamp(getInt(request, "repeaterEvery", 4), 2, 16);
+        List<BuildPlacement> placements = new ArrayList<>();
+        placements.add(new BuildPlacement(origin, "minecraft:lever"));
+        for (int i = 1; i <= length; i++) {
+            placements.add(new BuildPlacement(origin.offset(i, 0, 0), i % spacing == 0 ? "minecraft:repeater" : "minecraft:redstone"));
+        }
+        return placements;
+    }
+
+    private List<BuildPlacement> redstoneTorchTowerPlacements(BlockPos origin, JsonObject request) {
+        int height = clamp(getInt(request, "height", 5), 2, 24);
+        String block = normalizeItemId(getString(request, "blockId", "minecraft:cobblestone"));
+        List<BuildPlacement> placements = new ArrayList<>();
+        for (int y = 0; y < height; y++) {
+            placements.add(new BuildPlacement(origin.offset(0, y, 0), block));
+            placements.add(new BuildPlacement(origin.offset(y % 2 == 0 ? 1 : -1, y, 0), "minecraft:redstone_torch"));
+        }
+        return placements;
+    }
+
+    private List<BuildPlacement> redstoneClockPlacements(BlockPos origin, JsonObject request) {
+        List<BuildPlacement> placements = new ArrayList<>();
+        placements.add(new BuildPlacement(origin, "minecraft:lever"));
+        placements.add(new BuildPlacement(origin.offset(1, 0, 0), "minecraft:redstone"));
+        placements.add(new BuildPlacement(origin.offset(2, 0, 0), "minecraft:repeater"));
+        placements.add(new BuildPlacement(origin.offset(3, 0, 0), "minecraft:redstone"));
+        placements.add(new BuildPlacement(origin.offset(3, 0, 1), "minecraft:repeater"));
+        placements.add(new BuildPlacement(origin.offset(2, 0, 1), "minecraft:redstone"));
+        placements.add(new BuildPlacement(origin.offset(1, 0, 1), "minecraft:repeater"));
+        placements.add(new BuildPlacement(origin.offset(0, 0, 1), "minecraft:redstone"));
         return placements;
     }
 
@@ -5428,6 +5786,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "containerQuickMoveItem" -> runContainerQuickMoveItemTask(client, stepRequest);
             case "containerClickRole" -> runContainerClickRoleTask(client, stepRequest);
             case "containerButton" -> runContainerButtonTask(client, stepRequest);
+            case "containerText" -> runContainerTextTask(client, stepRequest);
+            case "recordExploreMarker" -> recordExploreMarker(client, stepRequest);
             case "refillHotbar" -> runRefillHotbarTask(client, stepRequest);
             case "openNearbyCraftingTable" -> runOpenNearbyCraftingTableTask(client, stepRequest);
             case "openNearbyContainer" -> runOpenNearbyContainerTask(client, stepRequest);
@@ -5954,6 +6314,85 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("containerId", player.containerMenu.containerId);
         root.add("semantic", currentContainerSemanticJson(player));
         root.add("container", currentContainerJson(player));
+        return root;
+    }
+
+    private JsonObject runContainerTextTask(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        if (player == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        String text = getString(request, "text", getString(request, "name", ""));
+        String field = getString(request, "field", "name").trim().toLowerCase(Locale.ROOT);
+        if (!"name".equals(field) && !"rename".equals(field)) {
+            return errorJson("UnsupportedTextField", "Only anvil rename text is currently supported.");
+        }
+        if (!(player.containerMenu instanceof AnvilMenu anvil)) {
+            JsonObject root = errorJson("UnsupportedContainer", "Current container is not an anvil.");
+            root.add("semantic", currentContainerSemanticJson(player));
+            return root;
+        }
+
+        String safeText = text.length() > AnvilMenu.MAX_NAME_LENGTH ? text.substring(0, AnvilMenu.MAX_NAME_LENGTH) : text;
+        boolean accepted = anvil.setItemName(safeText);
+        if (accepted && player.connection != null) {
+            player.connection.send(new ServerboundRenameItemPacket(safeText));
+        }
+        player.containerMenu.broadcastChanges();
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", accepted);
+        root.addProperty("field", field);
+        root.addProperty("text", safeText);
+        root.addProperty("cost", anvil.getCost());
+        root.add("semantic", currentContainerSemanticJson(player));
+        root.add("container", currentContainerJson(player));
+        if (!accepted) {
+            root.addProperty("message", "Anvil rejected the rename text, usually because no input item is present.");
+        }
+        return root;
+    }
+
+    private JsonObject recordExploreMarker(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+        BlockPos pos = request.has("x") ? blockPosFromJson(request, player.blockPosition()) : player.blockPosition();
+        JsonObject marker = new JsonObject();
+        marker.addProperty("id", "marker-" + System.currentTimeMillis());
+        marker.addProperty("label", getString(request, "label", "marker"));
+        marker.addProperty("kind", getString(request, "kind", "manual"));
+        marker.addProperty("dimension", level.dimension().identifier().toString());
+        marker.add("pos", blockPosJson(pos));
+        marker.addProperty("createdAtMs", System.currentTimeMillis());
+        marker.addProperty("time", Instant.now().toString());
+        synchronized (explorationLock) {
+            explorationMarkers.addLast(marker);
+            while (explorationMarkers.size() > 512) {
+                explorationMarkers.removeFirst();
+            }
+        }
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.add("marker", marker);
+        root.add("markers", explorationMarkersJson().getAsJsonArray("markers"));
+        return root;
+    }
+
+    private JsonObject explorationMarkersJson() {
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        JsonArray markers = new JsonArray();
+        synchronized (explorationLock) {
+            for (JsonObject marker : explorationMarkers) {
+                markers.add(marker.deepCopy());
+            }
+        }
+        root.add("markers", markers);
+        root.addProperty("count", markers.size());
         return root;
     }
 
@@ -6899,6 +7338,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         JsonObject roles = semanticRolesJson(menu);
         root.add("roles", roles);
         root.add("roleSlots", semanticRoleSlotsJson(player, menu, roles));
+        root.add("metadata", containerSpecificMetadataJson(player, menu));
         root.add("playerInventory", playerInventorySlotRangesJson(player, menu));
         root.addProperty("notes", "Use /container/clickRole with a role name, or /container/button for menu buttons such as enchant options.");
         return root;
@@ -6966,6 +7406,61 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         return roles;
+    }
+
+    private JsonObject containerSpecificMetadataJson(LocalPlayer player, AbstractContainerMenu menu) {
+        JsonObject root = new JsonObject();
+        if (menu instanceof EnchantmentMenu enchantment) {
+            JsonArray options = new JsonArray();
+            for (int i = 0; i < enchantment.costs.length; i++) {
+                JsonObject option = new JsonObject();
+                option.addProperty("index", i);
+                option.addProperty("buttonId", i);
+                option.addProperty("cost", enchantment.costs[i]);
+                option.addProperty("enchantClue", i < enchantment.enchantClue.length ? enchantment.enchantClue[i] : -1);
+                option.addProperty("levelClue", i < enchantment.levelClue.length ? enchantment.levelClue[i] : -1);
+                option.addProperty("canAffordLevel", player.experienceLevel >= enchantment.costs[i]);
+                option.addProperty("goldCount", enchantment.getGoldCount());
+                options.add(option);
+            }
+            root.add("enchantOptions", options);
+            root.addProperty("enchantmentSeed", enchantment.getEnchantmentSeed());
+        }
+        if (menu instanceof MerchantMenu merchant) {
+            root.addProperty("traderLevel", merchant.getTraderLevel());
+            root.addProperty("traderXp", merchant.getTraderXp());
+            root.addProperty("futureTraderXp", merchant.getFutureTraderXp());
+            root.addProperty("canRestock", merchant.canRestock());
+            root.addProperty("showProgressBar", merchant.showProgressBar());
+            JsonArray offers = new JsonArray();
+            MerchantOffers merchantOffers = merchant.getOffers();
+            for (int i = 0; i < merchantOffers.size(); i++) {
+                MerchantOffer offer = merchantOffers.get(i);
+                JsonObject item = new JsonObject();
+                item.addProperty("index", i);
+                item.addProperty("buttonId", i);
+                item.add("costA", itemJson(offer.getCostA()));
+                item.add("baseCostA", itemJson(offer.getBaseCostA()));
+                item.add("costB", itemJson(offer.getCostB()));
+                item.add("result", itemJson(offer.getResult()));
+                item.addProperty("uses", offer.getUses());
+                item.addProperty("maxUses", offer.getMaxUses());
+                item.addProperty("demand", offer.getDemand());
+                item.addProperty("specialPriceDiff", offer.getSpecialPriceDiff());
+                item.addProperty("priceMultiplier", offer.getPriceMultiplier());
+                item.addProperty("xp", offer.getXp());
+                item.addProperty("outOfStock", offer.isOutOfStock());
+                item.addProperty("needsRestock", offer.needsRestock());
+                offers.add(item);
+            }
+            root.add("tradeOffers", offers);
+        }
+        if (menu instanceof AnvilMenu anvil) {
+            root.addProperty("anvilCost", anvil.getCost());
+            root.addProperty("maxNameLength", AnvilMenu.MAX_NAME_LENGTH);
+            root.addProperty("canRename", menu.getSlot(0).hasItem());
+        }
+        return root;
     }
 
     private JsonArray semanticRoleSlotsJson(LocalPlayer player, AbstractContainerMenu menu, JsonObject roles) {
@@ -7714,15 +8209,17 @@ public final class PlayerProbeClient implements ClientModInitializer {
     }
 
     private List<Ingredient> recipeIngredients(RecipeHolder<?> holder) {
+        if (holder == null || holder.value() == null || holder.value().placementInfo().isImpossibleToPlace()) {
+            return List.of();
+        }
+        List<Ingredient> placementIngredients = holder.value().placementInfo().ingredients();
+        if (!placementIngredients.isEmpty()) {
+            return placementIngredients;
+        }
         List<Ingredient> ingredients = new ArrayList<>();
-        RecipeManager.ServerDisplayInfo ignored = null;
         if (holder.value() instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
             for (Optional<Ingredient> ingredient : shaped.getIngredients()) {
                 ingredient.ifPresent(ingredients::add);
-            }
-        } else if (holder.value() instanceof net.minecraft.world.item.crafting.ShapelessRecipe shapeless) {
-            if (!shapeless.display().isEmpty()) {
-                // fall through to display-driven requirements below
             }
         }
         return ingredients;
