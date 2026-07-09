@@ -1740,6 +1740,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (taskState.waitingForAction()) {
             taskState.markActionSnapshot(actionState.toJson());
             if (actionState.kind() != ActionKind.IDLE) {
+                if (handleTaskStuckAutoRecovery(client, taskState.currentStepIndex(), stepRequest, "waiting_for_action")) {
+                    return;
+                }
                 return;
             }
             taskState.finishWaiting();
@@ -1747,6 +1750,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         if (taskState.waitingForCondition()) {
             taskState.markConditionSnapshot(taskConditionSnapshot(client));
+            if ("action_idle".equals(taskState.waitConditionKind())
+                && actionState.kind() != ActionKind.IDLE
+                && handleTaskStuckAutoRecovery(client, taskState.currentStepIndex(), previousTaskStep(taskState), "waiting_for_action_idle")) {
+                return;
+            }
             if (!isTaskConditionSatisfied(client, taskState)) {
                 if (taskState.isConditionTimedOut()) {
                     JsonObject failure = errorJson("TaskConditionTimeout", "Task condition wait timed out.");
@@ -1768,6 +1776,78 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (taskState.currentStepIndex() >= taskState.steps().size()) {
             taskState = taskState.completed(createSnapshot(client, DEFAULT_RADIUS, true));
         }
+    }
+
+    private JsonObject previousTaskStep(TaskState state) {
+        int previousIndex = state.currentStepIndex() - 1;
+        if (previousIndex < 0 || previousIndex >= state.steps().size()) {
+            return null;
+        }
+        return state.steps().get(previousIndex);
+    }
+
+    private boolean handleTaskStuckAutoRecovery(Minecraft client, int currentStepIndex, JsonObject retryStep, String phase) {
+        ActionState state = actionState;
+        if (!state.stuck()) {
+            return false;
+        }
+        if (!taskState.autoRecoverStuck()) {
+            return false;
+        }
+        if (!taskState.canAutoRecover()) {
+            JsonObject failure = errorJson("TaskStuck", "Action is stuck and automatic recovery attempts are exhausted.");
+            failure.addProperty("stepIndex", currentStepIndex);
+            failure.addProperty("phase", phase);
+            failure.add("action", state.toJson());
+            taskState = taskState.failed("Task stopped because the action is stuck.", failure);
+            actionState = ActionState.idle("stuck action stopped after recovery attempts were exhausted");
+            controlledInput.clear();
+            if (client.player != null) {
+                restoreNormalInput(client.player);
+            }
+            return true;
+        }
+
+        int attempt = taskState.noteAutoRecovery();
+        JsonObject recoveryRequest = new JsonObject();
+        recoveryRequest.addProperty("left", attempt % 2 == 1);
+        List<JsonObject> inserted = new ArrayList<>(survivalRecoverSteps(client, recoveryRequest));
+        JsonObject retry = retryableTaskStep(retryStep);
+        if (retry != null) {
+            inserted.add(retry);
+        }
+        taskState.insertStepsAfterCurrent(inserted);
+
+        JsonObject event = new JsonObject();
+        event.addProperty("ok", true);
+        event.addProperty("autoRecovery", true);
+        event.addProperty("attempt", attempt);
+        event.addProperty("maxAutoRecoveries", taskState.maxAutoRecoveries());
+        event.addProperty("stepIndex", currentStepIndex);
+        event.addProperty("phase", phase);
+        event.add("stuckAction", state.toJson());
+        event.add("insertedSteps", taskStepsJson(inserted));
+        taskState.recordStep(event);
+
+        actionState = ActionState.idle("stuck action paused for automatic recovery");
+        controlledInput.clear();
+        if (client.player != null) {
+            restoreNormalInput(client.player);
+        }
+        return true;
+    }
+
+    private JsonObject retryableTaskStep(JsonObject step) {
+        if (step == null) {
+            return null;
+        }
+        String action = getString(step, "action", "").trim();
+        if (action.isBlank() || "waitForActionIdle".equals(action) || "recoverProcess".equals(action)) {
+            return null;
+        }
+        JsonObject retry = step.deepCopy();
+        retry.addProperty("autoRetry", true);
+        return retry;
     }
 
     private void tickPath(LocalPlayer player, ActionState state) {
@@ -3478,7 +3558,13 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 return errorJson("EmptyProcess", "No executable steps were generated.");
             }
             String taskId = "task-" + System.currentTimeMillis();
-            taskState = TaskState.running(taskId, steps, name);
+            taskState = TaskState.running(
+                taskId,
+                steps,
+                name,
+                getBoolean(request, "autoRecoverStuck", true),
+                clamp(getInt(request, "maxAutoRecoveries", 1), 0, 8)
+            );
             root.addProperty("started", true);
             root.add("task", taskState.toJson());
         } else {
@@ -4736,18 +4822,162 @@ public final class PlayerProbeClient implements ClientModInitializer {
             required.addProperty("crafting_table_access", 1);
             return required;
         }
+        if (id.endsWith("_helmet") || id.endsWith("_chestplate") || id.endsWith("_leggings") || id.endsWith("_boots")) {
+            String material = armorMaterialForItem(id);
+            int pieces = armorPieceCount(id);
+            required.addProperty(material, pieces * multiplier);
+            required.addProperty("crafting_table_access", 1);
+            return required;
+        }
         switch (id) {
             case "minecraft:stick" -> required.addProperty("any_planks", 2 * multiplier);
             case "minecraft:crafting_table" -> required.addProperty("any_planks", 4 * multiplier);
             case "minecraft:chest" -> required.addProperty("any_planks", 8 * multiplier);
+            case "minecraft:barrel" -> {
+                required.addProperty("any_planks", 6 * multiplier);
+                required.addProperty("any_wooden_slab", 2 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
             case "minecraft:furnace" -> required.addProperty("minecraft:cobblestone", 8 * multiplier);
+            case "minecraft:blast_furnace" -> {
+                required.addProperty("minecraft:furnace", multiplier);
+                required.addProperty("minecraft:iron_ingot", 5 * multiplier);
+                required.addProperty("minecraft:smooth_stone", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:smoker" -> {
+                required.addProperty("minecraft:furnace", multiplier);
+                required.addProperty("any_logs", 4 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:campfire" -> {
+                required.addProperty("minecraft:stick", 3 * multiplier);
+                required.addProperty("coal_or_charcoal", multiplier);
+                required.addProperty("any_logs", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
             case "minecraft:torch" -> {
                 required.addProperty("minecraft:stick", multiplier);
                 required.addProperty("coal_or_charcoal", multiplier);
             }
+            case "minecraft:ladder" -> {
+                required.addProperty("minecraft:stick", 7 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:oak_door", "minecraft:spruce_door", "minecraft:birch_door", "minecraft:jungle_door",
+                 "minecraft:acacia_door", "minecraft:dark_oak_door", "minecraft:mangrove_door", "minecraft:cherry_door",
+                 "minecraft:pale_oak_door", "minecraft:crimson_door", "minecraft:warped_door" -> {
+                required.addProperty("any_planks", 6 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:oak_trapdoor", "minecraft:spruce_trapdoor", "minecraft:birch_trapdoor", "minecraft:jungle_trapdoor",
+                 "minecraft:acacia_trapdoor", "minecraft:dark_oak_trapdoor", "minecraft:mangrove_trapdoor", "minecraft:cherry_trapdoor",
+                 "minecraft:pale_oak_trapdoor", "minecraft:crimson_trapdoor", "minecraft:warped_trapdoor" -> {
+                required.addProperty("any_planks", 6 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:oak_fence", "minecraft:spruce_fence", "minecraft:birch_fence", "minecraft:jungle_fence",
+                 "minecraft:acacia_fence", "minecraft:dark_oak_fence", "minecraft:mangrove_fence", "minecraft:cherry_fence",
+                 "minecraft:pale_oak_fence", "minecraft:crimson_fence", "minecraft:warped_fence" -> {
+                required.addProperty("any_planks", 4 * multiplier);
+                required.addProperty("minecraft:stick", 2 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:bed", "minecraft:white_bed", "minecraft:orange_bed", "minecraft:magenta_bed", "minecraft:light_blue_bed",
+                 "minecraft:yellow_bed", "minecraft:lime_bed", "minecraft:pink_bed", "minecraft:gray_bed",
+                 "minecraft:light_gray_bed", "minecraft:cyan_bed", "minecraft:purple_bed", "minecraft:blue_bed",
+                 "minecraft:brown_bed", "minecraft:green_bed", "minecraft:red_bed", "minecraft:black_bed" -> {
+                required.addProperty("any_wool", 3 * multiplier);
+                required.addProperty("any_planks", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:boat", "minecraft:oak_boat", "minecraft:spruce_boat", "minecraft:birch_boat", "minecraft:jungle_boat",
+                 "minecraft:acacia_boat", "minecraft:dark_oak_boat", "minecraft:mangrove_boat", "minecraft:cherry_boat",
+                 "minecraft:pale_oak_boat" -> {
+                required.addProperty("any_planks", 5 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:shield" -> {
+                required.addProperty("any_planks", 6 * multiplier);
+                required.addProperty("minecraft:iron_ingot", multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:bow" -> {
+                required.addProperty("minecraft:stick", 3 * multiplier);
+                required.addProperty("minecraft:string", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:fishing_rod" -> {
+                required.addProperty("minecraft:stick", 3 * multiplier);
+                required.addProperty("minecraft:string", 2 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:arrow" -> {
+                required.addProperty("minecraft:flint", multiplier);
+                required.addProperty("minecraft:stick", multiplier);
+                required.addProperty("minecraft:feather", multiplier);
+            }
+            case "minecraft:bucket" -> {
+                required.addProperty("minecraft:iron_ingot", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:shears" -> required.addProperty("minecraft:iron_ingot", 2 * multiplier);
+            case "minecraft:flint_and_steel" -> {
+                required.addProperty("minecraft:iron_ingot", multiplier);
+                required.addProperty("minecraft:flint", multiplier);
+            }
+            case "minecraft:compass" -> {
+                required.addProperty("minecraft:iron_ingot", 4 * multiplier);
+                required.addProperty("minecraft:redstone", multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:clock" -> {
+                required.addProperty("minecraft:gold_ingot", 4 * multiplier);
+                required.addProperty("minecraft:redstone", multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:book" -> {
+                required.addProperty("minecraft:paper", 3 * multiplier);
+                required.addProperty("minecraft:leather", multiplier);
+            }
+            case "minecraft:paper" -> required.addProperty("minecraft:sugar_cane", 3 * multiplier);
+            case "minecraft:bookshelf" -> {
+                required.addProperty("any_planks", 6 * multiplier);
+                required.addProperty("minecraft:book", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:enchanting_table" -> {
+                required.addProperty("minecraft:book", multiplier);
+                required.addProperty("minecraft:diamond", 2 * multiplier);
+                required.addProperty("minecraft:obsidian", 4 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:anvil" -> {
+                required.addProperty("minecraft:iron_ingot", 31 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:lever" -> {
+                required.addProperty("minecraft:stick", multiplier);
+                required.addProperty("minecraft:cobblestone", multiplier);
+            }
+            case "minecraft:repeater" -> {
+                required.addProperty("minecraft:redstone_torch", 2 * multiplier);
+                required.addProperty("minecraft:redstone", multiplier);
+                required.addProperty("minecraft:stone", 3 * multiplier);
+                required.addProperty("crafting_table_access", 1);
+            }
+            case "minecraft:redstone_torch" -> {
+                required.addProperty("minecraft:redstone", multiplier);
+                required.addProperty("minecraft:stick", multiplier);
+            }
             default -> {
                 if (id.endsWith("_planks")) {
                     required.addProperty("any_logs", multiplier);
+                } else if (id.endsWith("_slab")) {
+                    required.addProperty("any_planks", 3 * multiplier);
+                } else if (id.endsWith("_stairs")) {
+                    required.addProperty("any_planks", 6 * multiplier);
+                    required.addProperty("crafting_table_access", 1);
                 } else {
                     required.addProperty(id, multiplier);
                 }
@@ -4786,6 +5016,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "any_planks" -> inventoryCountAny(inventory, plankItemIds());
             case "coal_or_charcoal" -> inventoryCountAny(inventory, List.of("minecraft:coal", "minecraft:charcoal"));
             case "crafting_table_access" -> inventoryCount(inventory, "minecraft:crafting_table");
+            case "any_wool" -> inventoryCountAny(inventory, woolItemIds());
+            case "any_wooden_slab" -> inventoryCountAny(inventory, woodenSlabItemIds());
             default -> inventoryCount(inventory, normalizeItemId(id));
         };
     }
@@ -4892,17 +5124,38 @@ public final class PlayerProbeClient implements ClientModInitializer {
     }
 
     private boolean needsWoodParts(String itemId) {
-        return needsSticks(itemId) || "minecraft:crafting_table".equals(itemId) || "minecraft:chest".equals(itemId);
+        return needsSticks(itemId)
+            || "minecraft:crafting_table".equals(itemId)
+            || "minecraft:chest".equals(itemId)
+            || "minecraft:barrel".equals(itemId)
+            || itemId.endsWith("_door")
+            || itemId.endsWith("_trapdoor")
+            || itemId.endsWith("_fence")
+            || itemId.endsWith("_boat")
+            || "minecraft:shield".equals(itemId)
+            || "minecraft:bookshelf".equals(itemId);
     }
 
     private boolean needsSticks(String itemId) {
         return itemId.endsWith("_pickaxe") || itemId.endsWith("_axe") || itemId.endsWith("_shovel") || itemId.endsWith("_sword") || itemId.endsWith("_hoe")
-            || "minecraft:torch".equals(itemId) || "minecraft:ladder".equals(itemId);
+            || "minecraft:torch".equals(itemId) || "minecraft:ladder".equals(itemId)
+            || "minecraft:bow".equals(itemId) || "minecraft:fishing_rod".equals(itemId)
+            || "minecraft:arrow".equals(itemId) || "minecraft:lever".equals(itemId)
+            || "minecraft:redstone_torch".equals(itemId);
     }
 
     private boolean requiresCraftingTable(String itemId) {
         return itemId.endsWith("_pickaxe") || itemId.endsWith("_axe") || itemId.endsWith("_hoe")
-            || "minecraft:chest".equals(itemId) || "minecraft:furnace".equals(itemId);
+            || itemId.endsWith("_helmet") || itemId.endsWith("_chestplate") || itemId.endsWith("_leggings") || itemId.endsWith("_boots")
+            || itemId.endsWith("_door") || itemId.endsWith("_trapdoor") || itemId.endsWith("_fence")
+            || itemId.endsWith("_boat") || itemId.endsWith("_stairs")
+            || "minecraft:chest".equals(itemId) || "minecraft:barrel".equals(itemId) || "minecraft:furnace".equals(itemId)
+            || "minecraft:blast_furnace".equals(itemId) || "minecraft:smoker".equals(itemId) || "minecraft:campfire".equals(itemId)
+            || "minecraft:ladder".equals(itemId) || "minecraft:bed".equals(itemId) || itemId.endsWith("_bed")
+            || "minecraft:shield".equals(itemId) || "minecraft:bow".equals(itemId) || "minecraft:fishing_rod".equals(itemId)
+            || "minecraft:bucket".equals(itemId) || "minecraft:compass".equals(itemId) || "minecraft:clock".equals(itemId)
+            || "minecraft:bookshelf".equals(itemId) || "minecraft:enchanting_table".equals(itemId) || "minecraft:anvil".equals(itemId)
+            || "minecraft:repeater".equals(itemId);
     }
 
     private String materialForTier(String tier) {
@@ -4915,6 +5168,46 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "netherite" -> "minecraft:netherite_ingot";
             default -> "any_planks";
         };
+    }
+
+    private String armorMaterialForItem(String itemId) {
+        String id = normalizeItemId(itemId);
+        if (id.startsWith("minecraft:leather_")) {
+            return "minecraft:leather";
+        }
+        if (id.startsWith("minecraft:chainmail_")) {
+            return "minecraft:iron_ingot";
+        }
+        if (id.startsWith("minecraft:iron_")) {
+            return "minecraft:iron_ingot";
+        }
+        if (id.startsWith("minecraft:golden_")) {
+            return "minecraft:gold_ingot";
+        }
+        if (id.startsWith("minecraft:diamond_")) {
+            return "minecraft:diamond";
+        }
+        if (id.startsWith("minecraft:netherite_")) {
+            return "minecraft:netherite_ingot";
+        }
+        return "minecraft:leather";
+    }
+
+    private int armorPieceCount(String itemId) {
+        String id = normalizeItemId(itemId);
+        if (id.endsWith("_helmet")) {
+            return 5;
+        }
+        if (id.endsWith("_chestplate")) {
+            return 8;
+        }
+        if (id.endsWith("_leggings")) {
+            return 7;
+        }
+        if (id.endsWith("_boots")) {
+            return 4;
+        }
+        return 1;
     }
 
     private String preferredPlanksForInventory(Inventory inventory) {
@@ -4977,6 +5270,23 @@ public final class PlayerProbeClient implements ClientModInitializer {
             "minecraft:oak_planks", "minecraft:spruce_planks", "minecraft:birch_planks", "minecraft:jungle_planks",
             "minecraft:acacia_planks", "minecraft:dark_oak_planks", "minecraft:mangrove_planks", "minecraft:cherry_planks",
             "minecraft:pale_oak_planks", "minecraft:crimson_planks", "minecraft:warped_planks"
+        );
+    }
+
+    private List<String> woodenSlabItemIds() {
+        return List.of(
+            "minecraft:oak_slab", "minecraft:spruce_slab", "minecraft:birch_slab", "minecraft:jungle_slab",
+            "minecraft:acacia_slab", "minecraft:dark_oak_slab", "minecraft:mangrove_slab", "minecraft:cherry_slab",
+            "minecraft:pale_oak_slab", "minecraft:crimson_slab", "minecraft:warped_slab"
+        );
+    }
+
+    private List<String> woolItemIds() {
+        return List.of(
+            "minecraft:white_wool", "minecraft:orange_wool", "minecraft:magenta_wool", "minecraft:light_blue_wool",
+            "minecraft:yellow_wool", "minecraft:lime_wool", "minecraft:pink_wool", "minecraft:gray_wool",
+            "minecraft:light_gray_wool", "minecraft:cyan_wool", "minecraft:purple_wool", "minecraft:blue_wool",
+            "minecraft:brown_wool", "minecraft:green_wool", "minecraft:red_wool", "minecraft:black_wool"
         );
     }
 
@@ -5085,7 +5395,13 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         String taskId = "task-" + System.currentTimeMillis();
-        taskState = TaskState.running(taskId, steps, getString(request, "name", "task"));
+        taskState = TaskState.running(
+            taskId,
+            steps,
+            getString(request, "name", "task"),
+            getBoolean(request, "autoRecoverStuck", true),
+            clamp(getInt(request, "maxAutoRecoveries", 1), 0, 8)
+        );
         JsonObject root = taskState.toJson();
         root.addProperty("ok", true);
         return root;
@@ -6576,11 +6892,27 @@ public final class PlayerProbeClient implements ClientModInitializer {
         JsonObject root = new JsonObject();
         String type = menuTypeName(menu);
         root.addProperty("type", type);
+        root.addProperty("menuClass", menu.getClass().getName());
         root.addProperty("containerId", menu.containerId);
         root.addProperty("slotCount", menu.slots.size());
-        root.add("roles", semanticRolesJson(menu));
+        root.add("screen", screenMetadataJson(Minecraft.getInstance().screen));
+        JsonObject roles = semanticRolesJson(menu);
+        root.add("roles", roles);
+        root.add("roleSlots", semanticRoleSlotsJson(player, menu, roles));
         root.add("playerInventory", playerInventorySlotRangesJson(player, menu));
         root.addProperty("notes", "Use /container/clickRole with a role name, or /container/button for menu buttons such as enchant options.");
+        return root;
+    }
+
+    private JsonObject screenMetadataJson(Screen screen) {
+        JsonObject root = new JsonObject();
+        root.addProperty("name", screenName(screen));
+        root.addProperty("open", screen != null);
+        if (screen != null) {
+            root.addProperty("class", screen.getClass().getName());
+            root.addProperty("title", screen.getTitle().getString());
+            root.addProperty("isContainerScreen", screen instanceof AbstractContainerScreen<?>);
+        }
         return root;
     }
 
@@ -6634,6 +6966,31 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         return roles;
+    }
+
+    private JsonArray semanticRoleSlotsJson(LocalPlayer player, AbstractContainerMenu menu, JsonObject roles) {
+        JsonArray slots = new JsonArray();
+        for (Map.Entry<String, JsonElement> entry : roles.entrySet()) {
+            if (!entry.getValue().isJsonPrimitive()) {
+                continue;
+            }
+            int slotIndex = entry.getValue().getAsInt();
+            if (slotIndex < 0 || slotIndex >= menu.slots.size()) {
+                continue;
+            }
+            Slot slot = menu.getSlot(slotIndex);
+            JsonObject item = new JsonObject();
+            item.addProperty("role", entry.getKey());
+            item.addProperty("slot", slotIndex);
+            item.addProperty("inventoryIndex", slot.index);
+            item.addProperty("isPlayerInventory", slot.container == player.getInventory());
+            item.addProperty("hasItem", slot.hasItem());
+            if (slot.hasItem()) {
+                item.add("item", itemJson(slot.getItem()));
+            }
+            slots.add(item);
+        }
+        return slots;
     }
 
     private JsonObject playerInventorySlotRangesJson(LocalPlayer player, AbstractContainerMenu menu) {
@@ -7519,8 +7876,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private final boolean running;
         private final boolean completed;
         private final boolean cancelled;
+        private final boolean autoRecoverStuck;
+        private final int maxAutoRecoveries;
         private final String message;
         private int currentStepIndex;
+        private int autoRecoveriesUsed;
         private boolean stepStarted;
         private boolean waitingForAction;
         private boolean waitingForCondition;
@@ -7533,7 +7893,17 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private JsonObject currentConditionSnapshot;
         private JsonObject finalSnapshot;
 
-        private TaskState(String taskId, String name, List<JsonObject> steps, boolean running, boolean completed, boolean cancelled, String message) {
+        private TaskState(
+            String taskId,
+            String name,
+            List<JsonObject> steps,
+            boolean running,
+            boolean completed,
+            boolean cancelled,
+            boolean autoRecoverStuck,
+            int maxAutoRecoveries,
+            String message
+        ) {
             this.taskId = taskId;
             this.name = name;
             this.startedAtMs = System.currentTimeMillis();
@@ -7542,8 +7912,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             this.running = running;
             this.completed = completed;
             this.cancelled = cancelled;
+            this.autoRecoverStuck = autoRecoverStuck;
+            this.maxAutoRecoveries = Math.max(0, maxAutoRecoveries);
             this.message = message;
             this.currentStepIndex = 0;
+            this.autoRecoveriesUsed = 0;
             this.stepStarted = false;
             this.waitingForAction = false;
             this.waitingForCondition = false;
@@ -7557,16 +7930,21 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         static TaskState idle() {
-            return new TaskState("", "idle", List.of(), false, false, false, "idle");
+            return new TaskState("", "idle", List.of(), false, false, false, false, 0, "idle");
         }
 
         static TaskState running(String taskId, List<JsonObject> steps, String name) {
-            return new TaskState(taskId, name, steps, true, false, false, "running");
+            return running(taskId, steps, name, true, 1);
+        }
+
+        static TaskState running(String taskId, List<JsonObject> steps, String name, boolean autoRecoverStuck, int maxAutoRecoveries) {
+            return new TaskState(taskId, name, steps, true, false, false, autoRecoverStuck, maxAutoRecoveries, "running");
         }
 
         TaskState cancelled(String message) {
             TaskState next = copyWith(false, false, true, message);
             next.currentStepIndex = this.currentStepIndex;
+            next.autoRecoveriesUsed = this.autoRecoveriesUsed;
             next.stepStarted = this.stepStarted;
             next.waitingForAction = this.waitingForAction;
             next.waitingForCondition = this.waitingForCondition;
@@ -7585,6 +7963,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         TaskState failed(String message, JsonObject failure) {
             TaskState next = copyWith(false, false, false, message);
             next.currentStepIndex = this.currentStepIndex;
+            next.autoRecoveriesUsed = this.autoRecoveriesUsed;
             next.stepStarted = this.stepStarted;
             next.waitingForAction = this.waitingForAction;
             next.waitingForCondition = this.waitingForCondition;
@@ -7606,6 +7985,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         TaskState completed(JsonObject snapshot) {
             TaskState next = copyWith(false, true, false, "completed");
             next.currentStepIndex = this.currentStepIndex;
+            next.autoRecoveriesUsed = this.autoRecoveriesUsed;
             next.stepStarted = false;
             next.waitingForAction = false;
             next.waitingForCondition = false;
@@ -7622,7 +8002,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         private TaskState copyWith(boolean running, boolean completed, boolean cancelled, String message) {
-            return new TaskState(taskId, name, steps, running, completed, cancelled, message);
+            return new TaskState(taskId, name, steps, running, completed, cancelled, autoRecoverStuck, maxAutoRecoveries, message);
         }
 
         void recordStep(JsonObject result) {
@@ -7653,6 +8033,23 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         List<JsonObject> steps() {
             return steps;
+        }
+
+        boolean autoRecoverStuck() {
+            return autoRecoverStuck;
+        }
+
+        boolean canAutoRecover() {
+            return autoRecoveriesUsed < maxAutoRecoveries;
+        }
+
+        int noteAutoRecovery() {
+            autoRecoveriesUsed++;
+            return autoRecoveriesUsed;
+        }
+
+        int maxAutoRecoveries() {
+            return maxAutoRecoveries;
         }
 
         void insertStepsAfterCurrent(List<JsonObject> newSteps) {
@@ -7768,6 +8165,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
             root.addProperty("startedAtMs", startedAtMs);
             root.addProperty("currentStepIndex", currentStepIndex);
             root.addProperty("stepCount", steps.size());
+            root.addProperty("autoRecoverStuck", autoRecoverStuck);
+            root.addProperty("autoRecoveriesUsed", autoRecoveriesUsed);
+            root.addProperty("maxAutoRecoveries", maxAutoRecoveries);
             root.addProperty("stepStarted", stepStarted);
             root.addProperty("waitingForAction", waitingForAction);
             root.addProperty("waitingForCondition", waitingForCondition);
@@ -7981,6 +8381,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         void markStuck(String reason) {
             this.stuck = true;
             this.stuckReason = reason == null ? "stuck" : reason;
+        }
+
+        boolean stuck() {
+            return stuck;
         }
 
         BlockPos lookTarget() {

@@ -9,9 +9,9 @@ Minecraft player MVP, not a perfect fully autonomous Minecraft bot.
 | Area | Current Limit |
 |---|---|
 | Pathfinding | Walks conservatively; advanced path emits bounded repair steps but does not fully solve caves, ravines, swimming, ladders, or arbitrary vertical shafts. |
-| Stuck recovery | Recovery process exists and `action/status` reports stuck diagnostics; automatic recovery insertion is still future work. |
-| Crafting | Recipe tree exists, but special/shapeless recipes and complete dependency execution still need stronger modeling. |
-| Containers | Quick-move, hotbar refill, semantic role maps, role clicks, and menu buttons exist; complex UI edge cases still need more validation. |
+| Stuck recovery | Recovery process exists, `action/status` reports stuck diagnostics, and tasks can auto-insert recovery/retry steps; deeper obstacle-specific recovery still needs work. |
+| Crafting | Recipe tree and broader survival requirement guesses exist, but special/shapeless recipes and complete dependency execution still need stronger modeling. |
+| Containers | Quick-move, hotbar refill, semantic role maps, role slot snapshots, screen/menu metadata, role clicks, and menu buttons exist; complex UI edge cases still need more validation. |
 | Enchanting | v0.3 can put item/lapis, press an option, and take the item back; option quality still needs client-side display parsing. |
 | Villager trading | v0.3 can open villager UI, select a trade button, move payment, and take result; profession/trade metadata parsing remains future work. |
 | Anvil | v0.3 can place/open anvil, put left/right items, and take result; rename text input remains future work. |
@@ -23,9 +23,9 @@ Minecraft player MVP, not a perfect fully autonomous Minecraft bot.
 
 | Priority | Work |
 |---|---|
-| High | Convert stuck diagnostics into automatic recovery insertion for long tasks. |
+| High | Improve automatic recovery with obstacle-specific bridge/mine/swim/ladders handling. |
 | High | Parse displayed enchant/trade/anvil costs and names from UI widgets where available. |
-| High | Full recursive craft execution for common vanilla survival recipes. |
+| High | Full recursive craft execution for all common vanilla survival recipes. |
 | High | Better bridge/mine path repair for water, caves, ravines, ladders, and vertical shafts. |
 | Medium | More deterministic build material staging and hotbar refill during large builds. |
 | Medium | More templates: starter base, animal pen, crop farm, mine entrance, storage room, nether portal room. |

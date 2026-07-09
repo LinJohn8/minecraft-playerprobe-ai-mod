@@ -141,9 +141,20 @@ what still needs to be finished for the Minecraft AI player mod.
     brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.
   - `/container/clickRole` and `/container/button` let LLMs operate UI roles
     without guessing raw slot ids.
+  - `/container/semantic` now includes screen/menu metadata and role slot item
+    snapshots.
   - `/survival/enchantApply`, `/survival/tradeSelect`, and
     `/survival/anvilApply` add common final UI action chains.
   - `action/status` now exposes `stuck`, `stuckReason`, and `recoveryHint`.
+- v0.3 task hardening:
+  - `/task/start` and survival `start:true` tasks support `autoRecoverStuck`
+    and `maxAutoRecoveries`.
+  - The task runner can insert bounded recovery/retry steps when movement or
+    mining reports `stuck:true`.
+- v0.3 crafting/material knowledge:
+  - Requirement guesses now cover more common survival/building items such as
+    beds, doors, ladders, storage, furnaces, enchanting table/bookshelves,
+    armor, bows, fishing rods, buckets, shields, and basic redstone parts.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.3.jar`
 
@@ -162,6 +173,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - Tool/material survival wrappers now add common prerequisite chains for
     planks, sticks, crafting tables, and crafting-table access.
   - `/craft/tree` now exposes a recursive recipe tree surface.
+  - Common survival/building requirement guesses are broader, which improves
+    `/survival/missing` and `/craft/tree` planning.
   - Still needs stronger shapeless/special-recipe modeling and complete
     dependency execution for every vanilla recipe.
 - Inventory/container control:
@@ -169,6 +182,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - High-level process wrappers now exist for nearby open + transfer.
   - Quick-move by item, hotbar refill, semantic role maps, role clicks, and
     menu buttons now exist.
+  - Semantic container output now includes screen/menu metadata and current
+    role slot item snapshots.
   - Still needs richer UI text/cost parsing for complex anvil/enchanting/trading
     edge cases.
 
@@ -181,8 +196,7 @@ what still needs to be finished for the Minecraft AI player mod.
   - continue-style semantics
   - stateful loop conditions
 - Harden survival process chains:
-  - convert stuck diagnostics into automatic recovery insertion while chopping,
-    digging, and building
+  - improve automatic recovery with stronger bridge/mine/swim/ladders handling
   - stronger bridge/mine path repair for caves, water, ladders, ravines, and
     vertical shafts
   - parse final enchantment/trading/anvil labels/costs after the screen opens

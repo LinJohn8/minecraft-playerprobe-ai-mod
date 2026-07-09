@@ -57,7 +57,11 @@ curl -X POST http://127.0.0.1:8765/survival/smelt \
 
 - `start:false` or omitted means preview only.
 - `start:true` starts a task; poll `/task/status`.
+- Started survival tasks inherit task-level stuck auto-recovery by default.
+  Use `{"autoRecoverStuck":false}` to disable it or `{"maxAutoRecoveries":N}`
+  to allow more bounded recovery/retry attempts.
 - UI-heavy actions such as enchanting, trading, anvil, and brewing expose the
   real container/screen. v0.3 adds `/container/semantic`,
   `/container/clickRole`, and `/container/button` so LLMs can use role names
-  instead of guessing raw slot numbers.
+  instead of guessing raw slot numbers. `/container/semantic` also includes
+  screen/menu metadata and current semantic slot item snapshots.

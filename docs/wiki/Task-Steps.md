@@ -5,6 +5,8 @@
 ```json
 {
   "name": "example",
+  "autoRecoverStuck": true,
+  "maxAutoRecoveries": 1,
   "steps": [
     {"action": "gotoBlock", "id": "minecraft:crafting_table", "radius": 16},
     {"action": "waitForActionIdle", "timeoutMs": 20000}
@@ -17,6 +19,11 @@ Poll:
 ```text
 GET /task/status
 ```
+
+When `autoRecoverStuck` is enabled, path/mining actions that report
+`stuck:true` through `action/status` can cause the task runner to insert a
+bounded recovery chain and retry the stuck step. Inserted recovery steps are
+included in task `results` and `steps` so the LLM can inspect what happened.
 
 ## Control Flow
 
