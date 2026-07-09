@@ -49,17 +49,23 @@ what still needs to be finished for the Minecraft AI player mod.
   - `repeatUntil`
   - `breakIf`
   - `continueIf`
+  - `label`
+  - `gotoLabel`
+  - `setVar`
+  - `incVar`
   - `verifyBlock`
   - `verifyInventoryItem`
   - `verifyScreen`
   - `verifyContainer`
   - `verifyStatus`
+  - `verifyVar`
   - `selectHotbar`
   - `equipBest`
   - `openInventory`
   - `inventoryClick`
   - `containerTransfer`
   - `containerQuickMoveItem`
+  - `containerMoveToSlot`
   - `containerClickRole`
   - `containerButton`
   - `containerText`
@@ -151,11 +157,17 @@ what still needs to be finished for the Minecraft AI player mod.
     without guessing raw slot ids.
   - `/container/semantic` now includes screen/menu metadata and role slot item
     snapshots.
+  - `/container/moveToSlot` supports precise source-slot to target-slot movement,
+    with optional explicit swap and post-click verification.
   - `/survival/enchantApply`, `/survival/tradeSelect`, and
     `/survival/anvilApply` add common final UI action chains.
   - `action/status` now exposes `stuck`, `stuckReason`, and `recoveryHint`.
   - `/container/semantic` now exposes enchant option costs/clues, merchant
     trade offers, and anvil cost/rename readiness where available.
+  - Furnace and brewing menus now expose progress/fuel-style metadata where the
+    client menu provides it.
+  - Visible villager entities now expose profession, type, level, XP, and restock
+    metadata.
   - `/container/text` supports vanilla anvil rename text.
 - v0.3 task hardening:
   - `/task/start` and survival `start:true` tasks support `autoRecoverStuck`
@@ -165,6 +177,10 @@ what still needs to be finished for the Minecraft AI player mod.
   - Task DSL now supports multi-branch `switch`, long-action-friendly
     `repeatUntil`, `continueIf`, and status-based conditions through
     `verifyStatus`.
+  - Task DSL now supports task-local variables through `setVar`, `incVar`,
+    `${name}` substitution, and `verifyVar`.
+  - Task DSL now supports named `label` and bounded `gotoLabel` jumps for
+    process chains that need loops or recovery branches.
 - v0.3 crafting/material knowledge:
   - Requirement guesses now cover more common survival/building items such as
     beds, doors, ladders, storage, furnaces, enchanting table/bookshelves,
@@ -186,7 +202,7 @@ what still needs to be finished for the Minecraft AI player mod.
     blocks, ores, food, tools, combat, and farming.
   - `/survival/combat` supports optional shield bracing and kite/strafe steps.
   - `/explore/markers` and `recordExploreMarker` provide local exploration
-    memory for waypoints.
+    memory for waypoints and persist them under `~/.playerprobe/`.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.3.jar`
 
@@ -194,10 +210,11 @@ what still needs to be finished for the Minecraft AI player mod.
 
 - Task system:
   - Supports sequential steps, timed waits, screen waits, action-idle waits,
-    waiting for long-running action completion, retry, repeat, and conditional
-    step insertion, plus switch, repeat-until, continue-if, status conditions,
-    and break-style early task exit.
-  - Still lacks named labels/goto-style jumps and richer task-local variables.
+    waiting for long-running action completion, retry, repeat, conditional step
+    insertion, switch, repeat-until, continue-if, status conditions, variable
+    conditions, labels/goto jumps, counters, and break-style early task exit.
+  - Still lacks a full expression language beyond simple variables,
+    placeholders, counters, and comparisons.
 - Crafting process:
   - Inventory crafting and crafting-table crafting are implemented.
   - Basic higher-level process wrappers now exist.
@@ -215,18 +232,18 @@ what still needs to be finished for the Minecraft AI player mod.
   - High-level process wrappers now exist for nearby open + transfer.
   - Quick-move by item, hotbar refill, semantic role maps, role clicks, and
     menu buttons now exist.
+  - Precise `containerMoveToSlot` source/target movement now exists for empty
+    target slots, plus explicit swap mode.
   - Semantic container output now includes screen/menu metadata and current
     role slot item snapshots.
-  - Enchant costs/clues, merchant offers, and anvil cost/rename readiness are
-    exposed. Complex rendered text and some UI edge cases can still improve.
+  - Enchant costs/clues, merchant offers, villager metadata, brewing/furnace
+    progress metadata, and anvil cost/rename readiness are exposed. Complex
+    rendered text and some UI edge cases can still improve.
 
 ## Remaining Work
 
 ### High Priority
 
-- Add general task DSL steps:
-  - named labels/goto-style jumps
-  - richer task-local variables and counters
 - Harden survival process chains:
   - convert obstacle diagnostics into more automatic repair-plan selection
   - stronger bridge/mine path repair for caves, water, ladders, ravines, and
@@ -236,12 +253,12 @@ what still needs to be finished for the Minecraft AI player mod.
 
 ### Medium Priority
 
-- Improve action/task status with more detailed stuck and obstacle information.
+- Improve automatic selection among existing stuck/obstacle recovery strategies.
 - Add richer block/entity filtering and deterministic target selection helpers.
 - Add more explicit verification payloads for all write operations.
 - Add recipe-depth explanation for more vanilla blocks/items beyond the current
   common survival tools/materials.
-- Add richer UI metadata extraction for brewing and villager professions.
+- Add rendered UI text extraction where vanilla exposes only clues or widgets.
 
 ### Nice To Have
 

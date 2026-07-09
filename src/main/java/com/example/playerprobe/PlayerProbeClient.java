@@ -6,6 +6,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 import com.mojang.logging.LogUtils;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -40,6 +41,8 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.villager.VillagerData;
 import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.StackedItemContents;
@@ -51,7 +54,9 @@ import net.minecraft.world.item.crafting.display.RecipeDisplayEntry;
 import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractCraftingMenu;
+import net.minecraft.world.inventory.AbstractFurnaceMenu;
 import net.minecraft.world.inventory.AnvilMenu;
+import net.minecraft.world.inventory.BrewingStandMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.EnchantmentMenu;
@@ -87,6 +92,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -128,6 +135,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
     private final ArrayDeque<JsonObject> recentEvents = new ArrayDeque<>();
     private final Object explorationLock = new Object();
     private final ArrayDeque<JsonObject> explorationMarkers = new ArrayDeque<>();
+    private boolean explorationMarkersLoaded = false;
     private ObservationSnapshot lastObservation;
 
     @Override
@@ -190,6 +198,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/inventory/drop", this::handleInventoryDrop);
             server.createContext("/container", this::handleContainer);
             server.createContext("/container/transfer", this::handleContainerTransfer);
+            server.createContext("/container/moveToSlot", this::handleContainerMoveToSlot);
             server.createContext("/container/semantic", this::handleContainerSemantic);
             server.createContext("/container/clickRole", this::handleContainerClickRole);
             server.createContext("/container/button", this::handleContainerButton);
@@ -1181,6 +1190,17 @@ public final class PlayerProbeClient implements ClientModInitializer {
         sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
+    private void handleContainerMoveToSlot(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject request = readJsonObject(exchange);
+        JsonObject result = runOnGameThread(client -> runContainerMoveToSlotTask(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
     private void handleContainerSemantic(HttpExchange exchange) throws IOException {
         if (!isGet(exchange)) {
             sendText(exchange, 405, "Only GET is supported.\n", "text/plain; charset=utf-8");
@@ -1762,7 +1782,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
 
-        JsonObject stepRequest = taskState.steps().get(taskState.currentStepIndex());
+        JsonObject stepRequest = resolveTaskStepVariables(taskState.steps().get(taskState.currentStepIndex()));
         String action = getString(stepRequest, "action", "").trim();
         if (!taskState.stepStarted()) {
             JsonObject stepResult = runNamedTaskAction(client, action, stepRequest);
@@ -3096,6 +3116,16 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (entity instanceof LivingEntity living) {
             root.addProperty("health", living.getHealth());
             root.addProperty("maxHealth", living.getMaxHealth());
+        }
+        if (entity instanceof Villager villager) {
+            VillagerData data = villager.getVillagerData();
+            JsonObject villagerJson = new JsonObject();
+            villagerJson.addProperty("level", data.level());
+            villagerJson.addProperty("xp", villager.getVillagerXp());
+            villagerJson.addProperty("canRestock", villager.canRestock());
+            villagerJson.addProperty("profession", BuiltInRegistries.VILLAGER_PROFESSION.getKey(data.profession().value()).toString());
+            villagerJson.addProperty("type", BuiltInRegistries.VILLAGER_TYPE.getKey(data.type().value()).toString());
+            root.add("villager", villagerJson);
         }
         return root;
     }
@@ -5943,6 +5973,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "repeatUntil" -> runRepeatUntilTask(client, stepRequest);
             case "breakIf" -> runBreakIfTask(client, stepRequest);
             case "continueIf" -> runContinueIfTask(client, stepRequest);
+            case "label" -> runLabelTask(stepRequest);
+            case "gotoLabel" -> runGotoLabelTask(stepRequest);
+            case "setVar" -> runSetVarTask(stepRequest);
+            case "incVar" -> runIncVarTask(stepRequest);
             case "wait" -> runWaitTask(stepRequest);
             case "waitForScreen" -> runWaitForScreenTask(client, stepRequest);
             case "waitForActionIdle" -> runWaitForActionIdleTask(stepRequest);
@@ -5950,12 +5984,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "verifyInventoryItem" -> runVerifyInventoryItemTask(client, stepRequest);
             case "verifyScreen" -> runVerifyScreenTask(client, stepRequest);
             case "verifyContainer" -> runVerifyContainerTask(client, stepRequest);
+            case "verifyVar" -> runVerifyVarTask(stepRequest);
             case "selectHotbar" -> runSelectHotbarTask(client, stepRequest);
             case "equipBest" -> runEquipBestTask(client, stepRequest);
             case "openInventory" -> runOpenInventoryTask(client);
             case "inventoryClick" -> runInventoryClickTask(client, stepRequest);
             case "containerTransfer" -> runContainerTransferTask(client, stepRequest);
             case "containerQuickMoveItem" -> runContainerQuickMoveItemTask(client, stepRequest);
+            case "containerMoveToSlot" -> runContainerMoveToSlotTask(client, stepRequest);
             case "containerClickRole" -> runContainerClickRoleTask(client, stepRequest);
             case "containerButton" -> runContainerButtonTask(client, stepRequest);
             case "containerText" -> runContainerTextTask(client, stepRequest);
@@ -6235,6 +6271,89 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("skippedStepCount", skipped.size());
         root.add("skippedSteps", taskStepsJson(skipped));
         root.add("condition", evaluation);
+        return root;
+    }
+
+    private JsonObject runLabelTask(JsonObject request) {
+        String label = getString(request, "label", getString(request, "name", "")).trim();
+        if (label.isBlank()) {
+            return errorJson("InvalidLabel", "Field 'label' is required.");
+        }
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("label", label);
+        return root;
+    }
+
+    private JsonObject runGotoLabelTask(JsonObject request) {
+        String label = getString(request, "label", getString(request, "target", "")).trim();
+        if (label.isBlank()) {
+            return errorJson("InvalidGotoLabel", "Field 'label' is required.");
+        }
+
+        int targetIndex = taskState.findLabelIndex(label);
+        if (targetIndex < 0) {
+            JsonObject root = errorJson("LabelNotFound", "No task label named '" + label + "' was found.");
+            root.add("labels", taskState.labelsJson());
+            return root;
+        }
+
+        int maxJumps = clamp(getInt(request, "maxJumps", 256), 1, 4096);
+        String counterName = "__goto_" + label;
+        int count = taskState.intVariable(counterName, 0) + 1;
+        taskState.setVariable(counterName, new JsonPrimitive(count));
+        if (count > maxJumps) {
+            JsonObject root = errorJson("GotoLimitReached", "Label '" + label + "' exceeded maxJumps.");
+            root.addProperty("label", label);
+            root.addProperty("jumpCount", count);
+            root.addProperty("maxJumps", maxJumps);
+            return root;
+        }
+
+        taskState.requestJump(targetIndex);
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("label", label);
+        root.addProperty("targetIndex", targetIndex);
+        root.addProperty("jumpCount", count);
+        return root;
+    }
+
+    private JsonObject runSetVarTask(JsonObject request) {
+        String name = getString(request, "name", getString(request, "var", "")).trim();
+        if (name.isBlank()) {
+            return errorJson("InvalidVariable", "Field 'name' or 'var' is required.");
+        }
+
+        JsonElement value = request.has("value") ? request.get("value").deepCopy() : new JsonPrimitive("");
+        taskState.setVariable(name, value);
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("name", name);
+        root.add("value", value.deepCopy());
+        root.add("variables", taskState.variablesJson());
+        return root;
+    }
+
+    private JsonObject runIncVarTask(JsonObject request) {
+        String name = getString(request, "name", getString(request, "var", "")).trim();
+        if (name.isBlank()) {
+            return errorJson("InvalidVariable", "Field 'name' or 'var' is required.");
+        }
+
+        int delta = getInt(request, "delta", 1);
+        int initial = getInt(request, "initial", 0);
+        int next = taskState.intVariable(name, initial) + delta;
+        taskState.setVariable(name, new JsonPrimitive(next));
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("name", name);
+        root.addProperty("value", next);
+        root.addProperty("delta", delta);
+        root.add("variables", taskState.variablesJson());
         return root;
     }
 
@@ -6548,6 +6667,74 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return root;
     }
 
+    private JsonObject runContainerMoveToSlotTask(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        MultiPlayerGameMode gameMode = client.gameMode;
+        if (player == null || gameMode == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+
+        AbstractContainerMenu menu = player.containerMenu;
+        int from = getInt(request, "from", -1);
+        int to = getInt(request, "to", getInt(request, "target", -1));
+        if (from < 0 || from >= menu.slots.size() || to < 0 || to >= menu.slots.size()) {
+            return errorJson("InvalidSlot", "Source or target slot is out of range for current menu.");
+        }
+        if (from == to) {
+            JsonObject root = new JsonObject();
+            root.addProperty("ok", true);
+            root.addProperty("from", from);
+            root.addProperty("to", to);
+            root.addProperty("alreadyThere", true);
+            root.add("container", currentContainerJson(player));
+            return root;
+        }
+
+        Slot sourceSlot = menu.getSlot(from);
+        Slot targetSlot = menu.getSlot(to);
+        if (!sourceSlot.hasItem()) {
+            return errorJson("EmptySourceSlot", "Source slot has no item.");
+        }
+        boolean allowSwap = getBoolean(request, "allowSwap", false);
+        if (targetSlot.hasItem() && !allowSwap) {
+            JsonObject root = errorJson("TargetSlotOccupied", "Target slot is occupied. Pass allowSwap:true to swap.");
+            root.add("targetBefore", itemJson(targetSlot.getItem()));
+            return root;
+        }
+
+        ItemStack sourceBefore = sourceSlot.getItem().copy();
+        ItemStack targetBefore = targetSlot.getItem().copy();
+        gameMode.handleContainerInput(menu.containerId, from, 0, ContainerInput.PICKUP, player);
+        menu.broadcastChanges();
+        gameMode.handleContainerInput(menu.containerId, to, 0, ContainerInput.PICKUP, player);
+        menu.broadcastChanges();
+        if (allowSwap && !targetBefore.isEmpty()) {
+            gameMode.handleContainerInput(menu.containerId, from, 0, ContainerInput.PICKUP, player);
+            menu.broadcastChanges();
+        }
+        boolean moved = itemId(targetSlot.getItem()).equals(itemId(sourceBefore));
+        if (!moved && !menu.getCarried().isEmpty()) {
+            gameMode.handleContainerInput(menu.containerId, from, 0, ContainerInput.PICKUP, player);
+            menu.broadcastChanges();
+        }
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", moved);
+        root.addProperty("from", from);
+        root.addProperty("to", to);
+        root.addProperty("allowSwap", allowSwap);
+        root.addProperty("restoredOnFailure", !moved);
+        root.add("sourceBefore", itemJson(sourceBefore));
+        root.add("targetBefore", itemJson(targetBefore));
+        root.add("sourceAfter", itemJson(sourceSlot.getItem()));
+        root.add("targetAfter", itemJson(targetSlot.getItem()));
+        root.add("container", currentContainerJson(player));
+        if (!root.get("ok").getAsBoolean()) {
+            root.addProperty("message", "Move-to-slot verification did not find the source item in the target slot.");
+        }
+        return root;
+    }
+
     private JsonObject runContainerClickRoleTask(Minecraft client, JsonObject request) {
         LocalPlayer player = client.player;
         MultiPlayerGameMode gameMode = client.gameMode;
@@ -6650,10 +6837,12 @@ public final class PlayerProbeClient implements ClientModInitializer {
         marker.addProperty("createdAtMs", System.currentTimeMillis());
         marker.addProperty("time", Instant.now().toString());
         synchronized (explorationLock) {
+            ensureExplorationMarkersLoaded();
             explorationMarkers.addLast(marker);
             while (explorationMarkers.size() > 512) {
                 explorationMarkers.removeFirst();
             }
+            saveExplorationMarkers();
         }
         JsonObject root = new JsonObject();
         root.addProperty("ok", true);
@@ -6667,13 +6856,60 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("ok", true);
         JsonArray markers = new JsonArray();
         synchronized (explorationLock) {
+            ensureExplorationMarkersLoaded();
             for (JsonObject marker : explorationMarkers) {
                 markers.add(marker.deepCopy());
             }
         }
         root.add("markers", markers);
         root.addProperty("count", markers.size());
+        root.addProperty("storagePath", explorationMarkersPath().toString());
         return root;
+    }
+
+    private void ensureExplorationMarkersLoaded() {
+        if (explorationMarkersLoaded) {
+            return;
+        }
+        explorationMarkersLoaded = true;
+        Path path = explorationMarkersPath();
+        if (!Files.exists(path)) {
+            return;
+        }
+        try {
+            String raw = Files.readString(path, StandardCharsets.UTF_8);
+            JsonElement parsed = JsonParser.parseString(raw);
+            JsonArray array = parsed.isJsonArray() ? parsed.getAsJsonArray() : parsed.getAsJsonObject().getAsJsonArray("markers");
+            if (array != null) {
+                for (JsonElement element : array) {
+                    if (element.isJsonObject()) {
+                        explorationMarkers.addLast(element.getAsJsonObject().deepCopy());
+                    }
+                }
+            }
+        } catch (Exception error) {
+            LOGGER.warn("Failed to load PlayerProbe exploration markers", error);
+        }
+    }
+
+    private void saveExplorationMarkers() {
+        Path path = explorationMarkersPath();
+        try {
+            Files.createDirectories(path.getParent());
+            JsonObject root = new JsonObject();
+            JsonArray markers = new JsonArray();
+            for (JsonObject marker : explorationMarkers) {
+                markers.add(marker.deepCopy());
+            }
+            root.add("markers", markers);
+            Files.writeString(path, GSON.toJson(root), StandardCharsets.UTF_8);
+        } catch (Exception error) {
+            LOGGER.warn("Failed to save PlayerProbe exploration markers", error);
+        }
+    }
+
+    private Path explorationMarkersPath() {
+        return Path.of(System.getProperty("user.home"), ".playerprobe", "explore-markers.json");
     }
 
     private JsonObject runRefillHotbarTask(Minecraft client, JsonObject request) {
@@ -7456,8 +7692,47 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "verifyScreen" -> runVerifyScreenTask(client, condition);
             case "verifyContainer" -> runVerifyContainerTask(client, condition);
             case "verifyStatus" -> runVerifyStatusTask(client, condition);
+            case "verifyVar" -> runVerifyVarTask(condition);
             default -> errorJson("UnsupportedCondition", "Unsupported condition action '" + action + "'.");
         };
+    }
+
+    private JsonObject runVerifyVarTask(JsonObject request) {
+        String name = getString(request, "name", getString(request, "var", "")).trim();
+        if (name.isBlank()) {
+            return errorJson("InvalidVariable", "Field 'name' or 'var' is required.");
+        }
+
+        String op = getString(request, "op", "eq").trim().toLowerCase(Locale.ROOT);
+        boolean exists = taskState.hasVariable(name);
+        JsonElement actual = taskState.variable(name);
+        JsonElement expected = request.has("value") ? request.get("value") : new JsonPrimitive(true);
+        boolean ok = switch (op) {
+            case "exists" -> exists;
+            case "missing", "not_exists" -> !exists;
+            case "ne", "!=", "notEquals" -> exists && !jsonValuesEqual(actual, expected);
+            case "gt", ">" -> exists && compareJsonNumbers(actual, expected) > 0;
+            case "gte", ">=" -> exists && compareJsonNumbers(actual, expected) >= 0;
+            case "lt", "<" -> exists && compareJsonNumbers(actual, expected) < 0;
+            case "lte", "<=" -> exists && compareJsonNumbers(actual, expected) <= 0;
+            case "contains" -> exists && variableToString(actual).contains(variableToString(expected));
+            default -> exists && jsonValuesEqual(actual, expected);
+        };
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", ok);
+        root.addProperty("name", name);
+        root.addProperty("op", op);
+        root.addProperty("exists", exists);
+        if (actual != null) {
+            root.add("actual", actual.deepCopy());
+        }
+        root.add("expected", expected.deepCopy());
+        root.add("variables", taskState.variablesJson());
+        if (!ok) {
+            root.addProperty("message", "Variable verification failed.");
+        }
+        return root;
     }
 
     private JsonObject runVerifyStatusTask(Minecraft client, JsonObject request) {
@@ -7498,6 +7773,84 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
         }
         return steps;
+    }
+
+    private JsonObject resolveTaskStepVariables(JsonObject step) {
+        JsonElement resolved = resolveTaskVariables(step, taskState.variables());
+        return resolved != null && resolved.isJsonObject() ? resolved.getAsJsonObject() : step.deepCopy();
+    }
+
+    private JsonElement resolveTaskVariables(JsonElement element, Map<String, JsonElement> variables) {
+        if (element == null || element.isJsonNull()) {
+            return element;
+        }
+        if (element.isJsonObject()) {
+            JsonObject object = new JsonObject();
+            for (Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet()) {
+                object.add(entry.getKey(), resolveTaskVariables(entry.getValue(), variables));
+            }
+            return object;
+        }
+        if (element.isJsonArray()) {
+            JsonArray array = new JsonArray();
+            for (JsonElement child : element.getAsJsonArray()) {
+                array.add(resolveTaskVariables(child, variables));
+            }
+            return array;
+        }
+        if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isString()) {
+            String raw = element.getAsString();
+            if (raw.startsWith("${") && raw.endsWith("}") && raw.indexOf("${", 2) < 0) {
+                String name = raw.substring(2, raw.length() - 1);
+                JsonElement value = variables.get(name);
+                return value == null ? element.deepCopy() : value.deepCopy();
+            }
+            String resolved = raw;
+            for (Map.Entry<String, JsonElement> entry : variables.entrySet()) {
+                resolved = resolved.replace("${" + entry.getKey() + "}", variableToString(entry.getValue()));
+            }
+            return new JsonPrimitive(resolved);
+        }
+        return element.deepCopy();
+    }
+
+    private boolean jsonValuesEqual(JsonElement left, JsonElement right) {
+        if (left == null || right == null) {
+            return left == right;
+        }
+        if (left.isJsonPrimitive() && right.isJsonPrimitive()) {
+            JsonPrimitive leftPrimitive = left.getAsJsonPrimitive();
+            JsonPrimitive rightPrimitive = right.getAsJsonPrimitive();
+            if (leftPrimitive.isNumber() || rightPrimitive.isNumber()) {
+                return Double.compare(readDouble(left, Double.NaN), readDouble(right, Double.NaN)) == 0;
+            }
+        }
+        return variableToString(left).equals(variableToString(right));
+    }
+
+    private int compareJsonNumbers(JsonElement left, JsonElement right) {
+        return Double.compare(readDouble(left, 0.0D), readDouble(right, 0.0D));
+    }
+
+    private double readDouble(JsonElement element, double fallback) {
+        if (element == null || element.isJsonNull()) {
+            return fallback;
+        }
+        try {
+            return element.getAsDouble();
+        } catch (RuntimeException error) {
+            return fallback;
+        }
+    }
+
+    private String variableToString(JsonElement element) {
+        if (element == null || element.isJsonNull()) {
+            return "";
+        }
+        if (element.isJsonPrimitive()) {
+            return element.getAsString();
+        }
+        return GSON.toJson(element);
     }
 
     private void mergeInto(JsonObject target, JsonObject source) {
@@ -7716,6 +8069,24 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
     private JsonObject containerSpecificMetadataJson(LocalPlayer player, AbstractContainerMenu menu) {
         JsonObject root = new JsonObject();
+        if (menu instanceof AbstractFurnaceMenu furnace) {
+            root.addProperty("lit", furnace.isLit());
+            root.addProperty("burnProgress", furnace.getBurnProgress());
+            root.addProperty("litProgress", furnace.getLitProgress());
+            root.add("input", menu.getSlot(0).hasItem() ? itemJson(menu.getSlot(0).getItem()) : itemJson(ItemStack.EMPTY));
+            root.add("fuel", menu.getSlot(1).hasItem() ? itemJson(menu.getSlot(1).getItem()) : itemJson(ItemStack.EMPTY));
+            root.add("result", menu.getSlot(2).hasItem() ? itemJson(menu.getSlot(2).getItem()) : itemJson(ItemStack.EMPTY));
+        }
+        if (menu instanceof BrewingStandMenu brewing) {
+            root.addProperty("fuel", brewing.getFuel());
+            root.addProperty("brewingTicks", brewing.getBrewingTicks());
+            root.addProperty("brewing", brewing.getBrewingTicks() > 0);
+            root.add("bottle0", menu.getSlot(0).hasItem() ? itemJson(menu.getSlot(0).getItem()) : itemJson(ItemStack.EMPTY));
+            root.add("bottle1", menu.getSlot(1).hasItem() ? itemJson(menu.getSlot(1).getItem()) : itemJson(ItemStack.EMPTY));
+            root.add("bottle2", menu.getSlot(2).hasItem() ? itemJson(menu.getSlot(2).getItem()) : itemJson(ItemStack.EMPTY));
+            root.add("ingredient", menu.getSlot(3).hasItem() ? itemJson(menu.getSlot(3).getItem()) : itemJson(ItemStack.EMPTY));
+            root.add("fuelSlot", menu.getSlot(4).hasItem() ? itemJson(menu.getSlot(4).getItem()) : itemJson(ItemStack.EMPTY));
+        }
         if (menu instanceof EnchantmentMenu enchantment) {
             JsonArray options = new JsonArray();
             for (int i = 0; i < enchantment.costs.length; i++) {
@@ -8068,12 +8439,16 @@ public final class PlayerProbeClient implements ClientModInitializer {
     private JsonObject itemJson(ItemStack stack) {
         JsonObject root = new JsonObject();
         root.addProperty("empty", stack.isEmpty());
-        root.addProperty("id", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+        root.addProperty("id", itemId(stack));
         root.addProperty("name", stack.getHoverName().getString());
         root.addProperty("count", stack.getCount());
         root.addProperty("damage", stack.getDamageValue());
         root.addProperty("maxDamage", stack.getMaxDamage());
         return root;
+    }
+
+    private String itemId(ItemStack stack) {
+        return BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
     }
 
     private JsonObject vecJson(Vec3 vec) {
@@ -8682,8 +9057,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private final boolean autoRecoverStuck;
         private final int maxAutoRecoveries;
         private final String message;
+        private final Map<String, JsonElement> variables;
         private int currentStepIndex;
         private int autoRecoveriesUsed;
+        private int pendingJumpIndex;
         private boolean stepStarted;
         private boolean waitingForAction;
         private boolean waitingForCondition;
@@ -8718,8 +9095,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
             this.autoRecoverStuck = autoRecoverStuck;
             this.maxAutoRecoveries = Math.max(0, maxAutoRecoveries);
             this.message = message;
+            this.variables = new LinkedHashMap<>();
             this.currentStepIndex = 0;
             this.autoRecoveriesUsed = 0;
+            this.pendingJumpIndex = -1;
             this.stepStarted = false;
             this.waitingForAction = false;
             this.waitingForCondition = false;
@@ -8748,6 +9127,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             TaskState next = copyWith(false, false, true, message);
             next.currentStepIndex = this.currentStepIndex;
             next.autoRecoveriesUsed = this.autoRecoveriesUsed;
+            next.pendingJumpIndex = this.pendingJumpIndex;
             next.stepStarted = this.stepStarted;
             next.waitingForAction = this.waitingForAction;
             next.waitingForCondition = this.waitingForCondition;
@@ -8759,6 +9139,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             next.currentActionSnapshot = this.currentActionSnapshot == null ? null : this.currentActionSnapshot.deepCopy();
             next.currentConditionSnapshot = this.currentConditionSnapshot == null ? null : this.currentConditionSnapshot.deepCopy();
             next.results.addAll(this.results);
+            copyVariablesTo(next);
             next.finalSnapshot = this.finalSnapshot;
             return next;
         }
@@ -8767,6 +9148,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             TaskState next = copyWith(false, false, false, message);
             next.currentStepIndex = this.currentStepIndex;
             next.autoRecoveriesUsed = this.autoRecoveriesUsed;
+            next.pendingJumpIndex = this.pendingJumpIndex;
             next.stepStarted = this.stepStarted;
             next.waitingForAction = this.waitingForAction;
             next.waitingForCondition = this.waitingForCondition;
@@ -8778,6 +9160,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             next.currentActionSnapshot = this.currentActionSnapshot == null ? null : this.currentActionSnapshot.deepCopy();
             next.currentConditionSnapshot = this.currentConditionSnapshot == null ? null : this.currentConditionSnapshot.deepCopy();
             next.results.addAll(this.results);
+            copyVariablesTo(next);
             if (failure != null) {
                 next.results.add(failure.deepCopy());
             }
@@ -8789,6 +9172,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             TaskState next = copyWith(false, true, false, "completed");
             next.currentStepIndex = this.currentStepIndex;
             next.autoRecoveriesUsed = this.autoRecoveriesUsed;
+            next.pendingJumpIndex = -1;
             next.stepStarted = false;
             next.waitingForAction = false;
             next.waitingForCondition = false;
@@ -8800,6 +9184,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             next.currentActionSnapshot = this.currentActionSnapshot == null ? null : this.currentActionSnapshot.deepCopy();
             next.currentConditionSnapshot = this.currentConditionSnapshot == null ? null : this.currentConditionSnapshot.deepCopy();
             next.results.addAll(this.results);
+            copyVariablesTo(next);
             next.finalSnapshot = snapshot == null ? null : snapshot.deepCopy();
             return next;
         }
@@ -8808,12 +9193,24 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return new TaskState(taskId, name, steps, running, completed, cancelled, autoRecoverStuck, maxAutoRecoveries, message);
         }
 
+        private void copyVariablesTo(TaskState next) {
+            next.variables.clear();
+            for (Map.Entry<String, JsonElement> entry : this.variables.entrySet()) {
+                next.variables.put(entry.getKey(), entry.getValue().deepCopy());
+            }
+        }
+
         void recordStep(JsonObject result) {
             this.results.add(result.deepCopy());
         }
 
         void advance() {
-            this.currentStepIndex++;
+            if (this.pendingJumpIndex >= 0) {
+                this.currentStepIndex = this.pendingJumpIndex;
+                this.pendingJumpIndex = -1;
+            } else {
+                this.currentStepIndex++;
+            }
             this.stepStarted = false;
             this.waitingForAction = false;
             this.waitingForCondition = false;
@@ -8861,6 +9258,77 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         int maxAutoRecoveries() {
             return maxAutoRecoveries;
+        }
+
+        void requestJump(int targetIndex) {
+            this.pendingJumpIndex = Math.max(0, Math.min(targetIndex, steps.size()));
+        }
+
+        int findLabelIndex(String label) {
+            if (label == null || label.isBlank()) {
+                return -1;
+            }
+            for (int index = 0; index < steps.size(); index++) {
+                JsonObject step = steps.get(index);
+                String action = stepString(step, "action", "");
+                String stepLabel = stepString(step, "label", stepString(step, "name", ""));
+                if ("label".equals(action) && label.equals(stepLabel)) {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        JsonArray labelsJson() {
+            JsonArray labels = new JsonArray();
+            for (int index = 0; index < steps.size(); index++) {
+                JsonObject step = steps.get(index);
+                if (!"label".equals(stepString(step, "action", ""))) {
+                    continue;
+                }
+                JsonObject label = new JsonObject();
+                label.addProperty("index", index);
+                label.addProperty("label", stepString(step, "label", stepString(step, "name", "")));
+                labels.add(label);
+            }
+            return labels;
+        }
+
+        Map<String, JsonElement> variables() {
+            return variables;
+        }
+
+        boolean hasVariable(String name) {
+            return variables.containsKey(name);
+        }
+
+        JsonElement variable(String name) {
+            JsonElement value = variables.get(name);
+            return value == null ? null : value.deepCopy();
+        }
+
+        void setVariable(String name, JsonElement value) {
+            variables.put(name, value == null ? new JsonPrimitive("") : value.deepCopy());
+        }
+
+        int intVariable(String name, int fallback) {
+            JsonElement value = variables.get(name);
+            if (value == null || value.isJsonNull()) {
+                return fallback;
+            }
+            try {
+                return value.getAsInt();
+            } catch (RuntimeException error) {
+                return fallback;
+            }
+        }
+
+        JsonObject variablesJson() {
+            JsonObject root = new JsonObject();
+            for (Map.Entry<String, JsonElement> entry : variables.entrySet()) {
+                root.add(entry.getKey(), entry.getValue().deepCopy());
+            }
+            return root;
         }
 
         void insertStepsAfterCurrent(List<JsonObject> newSteps) {
@@ -9003,6 +9471,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             root.addProperty("autoRecoverStuck", autoRecoverStuck);
             root.addProperty("autoRecoveriesUsed", autoRecoveriesUsed);
             root.addProperty("maxAutoRecoveries", maxAutoRecoveries);
+            root.addProperty("pendingJumpIndex", pendingJumpIndex);
             root.addProperty("stepStarted", stepStarted);
             root.addProperty("waitingForAction", waitingForAction);
             root.addProperty("waitingForCondition", waitingForCondition);
@@ -9017,6 +9486,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
             root.add("steps", stepDescriptors);
             root.add("results", results.deepCopy());
+            root.add("variables", variablesJson());
+            root.add("labels", labelsJson());
             if (currentActionSnapshot != null) {
                 root.add("currentActionState", currentActionSnapshot.deepCopy());
             }
@@ -9027,6 +9498,17 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 root.add("snapshot", finalSnapshot.deepCopy());
             }
             return root;
+        }
+
+        private static String stepString(JsonObject step, String key, String fallback) {
+            if (step == null || !step.has(key) || step.get(key).isJsonNull()) {
+                return fallback;
+            }
+            try {
+                return step.get(key).getAsString();
+            } catch (RuntimeException error) {
+                return fallback;
+            }
         }
     }
 
