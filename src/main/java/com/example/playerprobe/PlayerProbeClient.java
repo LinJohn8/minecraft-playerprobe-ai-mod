@@ -629,7 +629,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
 
-        sendJson(exchange, 200, actionState.toJson());
+        JsonObject result = runOnGameThread(this::createActionStatus);
+        sendJson(exchange, 200, result);
     }
 
     private void handleActionStop(HttpExchange exchange) throws IOException {
@@ -2054,7 +2055,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.add("activity", currentActivityJson(client));
         root.add("menu", createMenuStatus(client));
         root.add("task", taskState.toJson());
-        root.add("action", actionState.toJson());
+        root.add("action", createActionStatus(client));
         root.add("screen", screenMetadataJson(client.screen));
         if (level != null) {
             root.add("world", worldJson(level));
@@ -2069,6 +2070,52 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
         }
         root.add("recentEvents", recentEventsJson(8));
+        return root;
+    }
+
+    private JsonObject createActionStatus(Minecraft client) {
+        JsonObject root = actionState.toJson();
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player != null && level != null) {
+            root.add("diagnostics", movementDiagnosticsJson(client, player, level));
+        }
+        return root;
+    }
+
+    private JsonObject movementDiagnosticsJson(Minecraft client, LocalPlayer player, ClientLevel level) {
+        JsonObject root = new JsonObject();
+        BlockPos feet = player.blockPosition();
+        Direction facing = player.getDirection();
+        BlockPos front = feet.relative(facing);
+        root.add("playerBlock", blockPosJson(feet));
+        root.addProperty("facing", facing.getName());
+        root.add("feetBlock", blockJson(level, feet, null));
+        root.add("belowBlock", blockJson(level, feet.below(), null));
+        root.add("headBlock", blockJson(level, feet.above(), null));
+        root.add("frontFeetBlock", blockJson(level, front, null));
+        root.add("frontHeadBlock", blockJson(level, front.above(), null));
+        root.add("frontBelowBlock", blockJson(level, front.below(), null));
+        root.addProperty("inLiquid", isLiquidBlock(level, feet));
+        root.addProperty("frontLiquid", isLiquidBlock(level, front));
+        root.addProperty("frontBlocked", !level.getBlockState(front).isAir() || !level.getBlockState(front.above()).isAir());
+        root.addProperty("frontGap", level.getBlockState(front.below()).isAir() || isLiquidBlock(level, front.below()));
+        root.addProperty("headBlocked", !level.getBlockState(feet.above()).isAir());
+        root.add("raycast", raycastJson(client, player, level, 6));
+        JsonArray hints = new JsonArray();
+        if (root.get("frontBlocked").getAsBoolean()) {
+            hints.add("mine_or_path_around_front_obstruction");
+        }
+        if (root.get("frontGap").getAsBoolean()) {
+            hints.add("bridge_or_place_floor_before_moving_forward");
+        }
+        if (root.get("inLiquid").getAsBoolean() || root.get("frontLiquid").getAsBoolean()) {
+            hints.add("swim_or_fill_liquid_path");
+        }
+        if (root.get("headBlocked").getAsBoolean()) {
+            hints.add("mine_head_space");
+        }
+        root.add("recoveryHints", hints);
         return root;
     }
 
@@ -5891,8 +5938,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return switch (action) {
             case "retry" -> runRetryTask(client, stepRequest);
             case "if" -> runIfTask(client, stepRequest);
+            case "switch" -> runSwitchTask(client, stepRequest);
             case "repeat" -> runRepeatTask(client, stepRequest);
+            case "repeatUntil" -> runRepeatUntilTask(client, stepRequest);
             case "breakIf" -> runBreakIfTask(client, stepRequest);
+            case "continueIf" -> runContinueIfTask(client, stepRequest);
             case "wait" -> runWaitTask(stepRequest);
             case "waitForScreen" -> runWaitForScreenTask(client, stepRequest);
             case "waitForActionIdle" -> runWaitForActionIdleTask(stepRequest);
@@ -6024,6 +6074,49 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return root;
     }
 
+    private JsonObject runSwitchTask(Minecraft client, JsonObject request) {
+        if (!request.has("cases") || !request.get("cases").isJsonArray()) {
+            return errorJson("InvalidSwitch", "Field 'cases' must be a JSON array.");
+        }
+
+        JsonArray cases = request.getAsJsonArray("cases");
+        JsonArray evaluations = new JsonArray();
+        List<JsonObject> selected = List.of();
+        int matchedIndex = -1;
+        for (int i = 0; i < cases.size(); i++) {
+            JsonElement element = cases.get(i);
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject branch = element.getAsJsonObject();
+            if (!branch.has("condition") || !branch.get("condition").isJsonObject()) {
+                continue;
+            }
+            JsonObject evaluation = evaluateTaskCondition(client, branch.getAsJsonObject("condition"));
+            evaluation.addProperty("caseIndex", i);
+            evaluations.add(evaluation.deepCopy());
+            if (!evaluation.has("error") && evaluation.has("ok") && evaluation.get("ok").getAsBoolean()) {
+                selected = parseTaskStepsFromField(branch, "steps");
+                matchedIndex = i;
+                break;
+            }
+        }
+
+        if (matchedIndex < 0) {
+            selected = parseTaskStepsFromField(request, "default");
+        }
+        taskState.insertStepsAfterCurrent(selected);
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("matched", matchedIndex >= 0);
+        root.addProperty("matchedIndex", matchedIndex);
+        root.addProperty("insertedStepCount", selected.size());
+        root.add("evaluations", evaluations);
+        root.add("insertedSteps", taskStepsJson(selected));
+        return root;
+    }
+
     private JsonObject runRepeatTask(Minecraft client, JsonObject request) {
         if (!request.has("step") || !request.get("step").isJsonObject()) {
             return errorJson("InvalidRepeatStep", "Field 'step' must be a JSON object.");
@@ -6057,6 +6150,48 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return root;
     }
 
+    private JsonObject runRepeatUntilTask(Minecraft client, JsonObject request) {
+        if (!request.has("until") || !request.get("until").isJsonObject()) {
+            return errorJson("InvalidRepeatUntil", "Field 'until' must be a condition object.");
+        }
+        List<JsonObject> body = parseTaskStepsFromField(request, "steps");
+        if (body.isEmpty() && request.has("step") && request.get("step").isJsonObject()) {
+            body = List.of(request.getAsJsonObject("step").deepCopy());
+        }
+        if (body.isEmpty()) {
+            return errorJson("InvalidRepeatUntil", "Field 'steps' or 'step' is required.");
+        }
+
+        int iteration = clamp(getInt(request, "iteration", 0), 0, 1024);
+        int maxIterations = clamp(getInt(request, "maxIterations", 8), 1, 1024);
+        JsonObject evaluation = evaluateTaskCondition(client, request.getAsJsonObject("until"));
+        if (evaluation.has("error")) {
+            return evaluation;
+        }
+        boolean done = evaluation.has("ok") && evaluation.get("ok").getAsBoolean();
+        List<JsonObject> inserted = new ArrayList<>();
+        if (!done && iteration < maxIterations) {
+            inserted.addAll(body);
+            JsonObject next = request.deepCopy();
+            next.addProperty("iteration", iteration + 1);
+            inserted.add(next);
+            taskState.insertStepsAfterCurrent(inserted);
+        }
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("done", done);
+        root.addProperty("iteration", iteration);
+        root.addProperty("maxIterations", maxIterations);
+        root.addProperty("insertedStepCount", inserted.size());
+        root.add("until", evaluation);
+        root.add("insertedSteps", taskStepsJson(inserted));
+        if (!done && iteration >= maxIterations) {
+            root.addProperty("maxIterationsReached", true);
+        }
+        return root;
+    }
+
     private JsonObject runBreakIfTask(Minecraft client, JsonObject request) {
         if (!request.has("condition") || !request.get("condition").isJsonObject()) {
             return errorJson("InvalidBreakCondition", "Field 'condition' must be a JSON object.");
@@ -6076,6 +6211,29 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("ok", true);
         root.addProperty("matched", matched);
         root.addProperty("breakRequested", matched);
+        root.add("condition", evaluation);
+        return root;
+    }
+
+    private JsonObject runContinueIfTask(Minecraft client, JsonObject request) {
+        if (!request.has("condition") || !request.get("condition").isJsonObject()) {
+            return errorJson("InvalidContinueCondition", "Field 'condition' must be a JSON object.");
+        }
+
+        JsonObject evaluation = evaluateTaskCondition(client, request.getAsJsonObject("condition"));
+        if (evaluation.has("error")) {
+            return evaluation;
+        }
+
+        boolean matched = evaluation.has("ok") && evaluation.get("ok").getAsBoolean();
+        int skipSteps = matched ? clamp(getInt(request, "skipSteps", 1), 0, 512) : 0;
+        List<JsonObject> skipped = taskState.removeStepsAfterCurrent(skipSteps);
+
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("matched", matched);
+        root.addProperty("skippedStepCount", skipped.size());
+        root.add("skippedSteps", taskStepsJson(skipped));
         root.add("condition", evaluation);
         return root;
     }
@@ -7297,8 +7455,34 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "verifyInventoryItem" -> runVerifyInventoryItemTask(client, condition);
             case "verifyScreen" -> runVerifyScreenTask(client, condition);
             case "verifyContainer" -> runVerifyContainerTask(client, condition);
+            case "verifyStatus" -> runVerifyStatusTask(client, condition);
             default -> errorJson("UnsupportedCondition", "Unsupported condition action '" + action + "'.");
         };
+    }
+
+    private JsonObject runVerifyStatusTask(Minecraft client, JsonObject request) {
+        JsonObject activity = currentActivityJson(client);
+        String expectedActivity = getString(request, "activityKind", getString(request, "kind", "")).trim();
+        String expectedActionKind = getString(request, "actionKind", "").trim();
+        boolean ok = true;
+        if (!expectedActivity.isBlank()) {
+            ok = expectedActivity.equalsIgnoreCase(getString(activity, "kind", ""));
+        }
+        if (ok && request.has("busy")) {
+            ok = getBoolean(activity, "busy", false) == getBoolean(request, "busy", false);
+        }
+        if (ok && request.has("taskRunning")) {
+            ok = taskState.running() == getBoolean(request, "taskRunning", false);
+        }
+        if (ok && !expectedActionKind.isBlank()) {
+            ok = actionState.kind().name().equalsIgnoreCase(expectedActionKind);
+        }
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", ok);
+        root.add("activity", activity);
+        root.addProperty("taskRunning", taskState.running());
+        root.addProperty("actionKind", actionState.kind().name().toLowerCase(Locale.ROOT));
+        return root;
     }
 
     private List<JsonObject> parseTaskStepsFromField(JsonObject request, String key) {
@@ -8685,6 +8869,18 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
             int insertAt = Math.min(currentStepIndex + 1, steps.size());
             steps.addAll(insertAt, newSteps.stream().map(JsonObject::deepCopy).toList());
+        }
+
+        List<JsonObject> removeStepsAfterCurrent(int count) {
+            if (count <= 0) {
+                return List.of();
+            }
+            List<JsonObject> removed = new ArrayList<>();
+            int removeAt = Math.min(currentStepIndex + 1, steps.size());
+            for (int i = 0; i < count && removeAt < steps.size(); i++) {
+                removed.add(steps.remove(removeAt).deepCopy());
+            }
+            return removed;
         }
 
         void requestBreak() {

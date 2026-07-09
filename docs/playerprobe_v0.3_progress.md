@@ -44,12 +44,16 @@ what still needs to be finished for the Minecraft AI player mod.
   - `waitForActionIdle`
   - `retry`
   - `if`
+  - `switch`
   - `repeat`
+  - `repeatUntil`
   - `breakIf`
+  - `continueIf`
   - `verifyBlock`
   - `verifyInventoryItem`
   - `verifyScreen`
   - `verifyContainer`
+  - `verifyStatus`
   - `selectHotbar`
   - `equipBest`
   - `openInventory`
@@ -158,6 +162,9 @@ what still needs to be finished for the Minecraft AI player mod.
     and `maxAutoRecoveries`.
   - The task runner can insert bounded recovery/retry steps when movement or
     mining reports `stuck:true`.
+  - Task DSL now supports multi-branch `switch`, long-action-friendly
+    `repeatUntil`, `continueIf`, and status-based conditions through
+    `verifyStatus`.
 - v0.3 crafting/material knowledge:
   - Requirement guesses now cover more common survival/building items such as
     beds, doors, ladders, storage, furnaces, enchanting table/bookshelves,
@@ -168,6 +175,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/status` provides a unified activity/status surface with `activity.kind`,
     `activity.summary`, task/action/menu/player/world/container state, and
     recent events.
+  - `/action/status` now exposes movement diagnostics for front obstruction,
+    gaps, liquids, head space, raycast, and recovery hints.
   - `/survival/advancedPath` now emits bounded terrain repair steps for gaps,
     liquids, breakable obstruction, and vertical assist before retrying.
   - `/build/template` includes starter base, storage room, animal pen, crop
@@ -186,9 +195,9 @@ what still needs to be finished for the Minecraft AI player mod.
 - Task system:
   - Supports sequential steps, timed waits, screen waits, action-idle waits,
     waiting for long-running action completion, retry, repeat, and conditional
-    step insertion, plus break-style early task exit.
-  - Still lacks richer branch semantics such as multi-branch and stateful loop
-    conditions.
+    step insertion, plus switch, repeat-until, continue-if, status conditions,
+    and break-style early task exit.
+  - Still lacks named labels/goto-style jumps and richer task-local variables.
 - Crafting process:
   - Inventory crafting and crafting-table crafting are implemented.
   - Basic higher-level process wrappers now exist.
@@ -216,11 +225,10 @@ what still needs to be finished for the Minecraft AI player mod.
 ### High Priority
 
 - Add general task DSL steps:
-  - richer branch semantics
-  - continue-style semantics
-  - stateful loop conditions
+  - named labels/goto-style jumps
+  - richer task-local variables and counters
 - Harden survival process chains:
-  - improve automatic recovery with more obstacle-specific live diagnosis
+  - convert obstacle diagnostics into more automatic repair-plan selection
   - stronger bridge/mine path repair for caves, water, ladders, ravines, and
     vertical shafts
   - parse final rendered enchantment/trading/anvil labels where vanilla only
