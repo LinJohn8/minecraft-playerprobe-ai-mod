@@ -21,6 +21,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/screen/status`
   - `/survival/status`
   - `/survival/missing`
+  - `/craft/tree`
+  - `/survival/decision`
 - Player-like bounded actions:
   - `goto`
   - `gotoBlock`
@@ -51,6 +53,8 @@ what still needs to be finished for the Minecraft AI player mod.
   - `openInventory`
   - `inventoryClick`
   - `containerTransfer`
+  - `containerQuickMoveItem`
+  - `refillHotbar`
 - Higher-level process helpers added:
   - `openNearbyCraftingTable`
   - `openNearbyContainer`
@@ -67,6 +71,26 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/survival/craftTool`
   - `/survival/craftMaterial`
   - `/survival/enchant`
+  - `/survival/advancedPath`
+  - `/survival/recover`
+  - `/survival/smelt`
+  - `/survival/experience`
+  - `/survival/combat`
+  - `/survival/farm`
+  - `/survival/mine`
+  - `/survival/light`
+  - `/survival/sleep`
+  - `/survival/placeWorkstation`
+  - `/survival/dimension`
+  - `/survival/redstone`
+  - `/survival/trade`
+  - `/survival/fish`
+  - `/survival/brew`
+  - `/survival/anvil`
+  - `/survival/explore`
+  - `/storage/organize`
+  - `/build/template`
+  - `/build/refillHotbar`
 - Survival task helpers added:
   - `chopTreeProcess`
   - `digProcess`
@@ -74,9 +98,35 @@ what still needs to be finished for the Minecraft AI player mod.
   - `craftToolProcess`
   - `craftMaterialProcess`
   - `enchantPrepareProcess`
+  - `advancedPathProcess`
+  - `recoverProcess`
+  - `smeltProcess`
+  - `storageOrganizeProcess`
+  - `buildTemplateProcess`
+  - `experienceProcess`
+  - `combatProcess`
+  - `farmProcess`
+  - `mineProcess`
+  - `lightProcess`
+  - `sleepProcess`
+  - `placeWorkstationProcess`
+  - `dimensionProcess`
+  - `redstoneProcess`
+  - `tradeProcess`
+  - `fishProcess`
+  - `brewProcess`
+  - `anvilProcess`
+  - `exploreProcess`
 - Survival endpoints support preview-first planning and `{"start":true}` task
   execution, with generated `steps`, inventory summaries, and missing-material
   analysis where applicable.
+- Complex survival coverage now has interface and base process-chain support for
+  conservative advanced path fallback, stuck recovery, recursive craft tree
+  inspection, furnace smelting, storage organization, build templates, hotbar
+  refill, experience planning, combat planning, farming, mining, lighting,
+  sleeping, workstation placement, nether portal planning, redstone templates,
+  villager interaction opening, fishing, brewing stand opening/filling, anvil
+  opening, and waypoint exploration.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.2.jar`
 
@@ -94,12 +144,15 @@ what still needs to be finished for the Minecraft AI player mod.
   - Auto-repair wrappers for inventory crafting and table crafting now exist.
   - Tool/material survival wrappers now add common prerequisite chains for
     planks, sticks, crafting tables, and crafting-table access.
-  - Still needs richer recursive recipe planning for every vanilla recipe.
+  - `/craft/tree` now exposes a recursive recipe tree surface.
+  - Still needs stronger shapeless/special-recipe modeling and complete
+    dependency execution for every vanilla recipe.
 - Inventory/container control:
   - Read, click, transfer, drop, select, equip are implemented.
   - High-level process wrappers now exist for nearby open + transfer.
-  - Still needs stronger deterministic move chains and slot-targeting
-    convenience steps.
+  - Quick-move by item and hotbar refill now exist.
+  - Still needs stronger deterministic slot-targeted UI chains for complex
+    anvil/enchanting/trading edge cases.
 
 ## Remaining Work
 
@@ -110,9 +163,10 @@ what still needs to be finished for the Minecraft AI player mod.
   - continue-style semantics
   - stateful loop conditions
 - Harden survival process chains:
-  - stronger stuck/obstacle recovery while chopping, digging, and building
-  - deterministic hotbar refill before large build placement chains
-  - final enchantment option selection after the enchanting table screen opens
+  - better stuck detection while chopping, digging, and building
+  - stronger bridge/mine path repair for caves, water, ladders, ravines, and
+    vertical shafts
+  - final enchantment/trading/anvil option selection after the screen opens
 
 ### Medium Priority
 
@@ -121,10 +175,12 @@ what still needs to be finished for the Minecraft AI player mod.
 - Add more explicit verification payloads for all write operations.
 - Add recipe-depth explanation for more vanilla blocks/items beyond the current
   common survival tools/materials.
+- Add stronger UI-specific slot maps for brewing, trading, anvil, enchanting,
+  and villager professions.
 
 ### Nice To Have
 
-- More building templates beyond the basic house generator.
+- More building templates beyond house/farm/mine-stairs/portal/redstone-line.
 - Better recipe depth and dependency explanation.
 - More menu/process helpers for create-world screen state introspection.
 
