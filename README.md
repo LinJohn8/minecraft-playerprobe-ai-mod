@@ -352,6 +352,8 @@ curl http://127.0.0.1:8765/task/status
 
 Process notes:
 
+- `/menu/worlds` copies Minecraft 26.1's immutable level-summary result before sorting, so listing/loading local worlds no longer degrades into an `UnsupportedOperationException` placeholder.
+
 - `GET /status` is the unified "what is the player/mod doing now?" endpoint. It returns `activity.kind`, a readable `activity.summary`, and the current menu/task/action/player/world/container state for LLM polling.
 - `craft` now follows a player-like process instead of directly mutating inventory.
 - Camera requests rotate over multiple client ticks. Path movement turns toward
@@ -373,9 +375,14 @@ Process notes:
 - Task steps can use `${variableName}` placeholders after `setVar`/`incVar`; `/task/status` exposes live `variables`, `labels`, and pending jump state so an LLM can debug loops and counters.
 - `/survival/*` endpoints are higher-level survival planners. They return material checks plus executable task steps by default; pass `{"start":true}` to execute the generated player-like task immediately.
 - `/survival/chopTree` finds a nearby vanilla log/stem, walks to it, equips the best mining tool, mines vertical logs one by one, waits for each break, verifies air, and picks up drops.
+- Targeted `/survival/mine` follows the same collect-block queue: for each exact stone/ore position it replans to a reachable position with unobstructed line of sight, equips the best tool, mines with visible hand swings, waits, verifies the block is gone, and finally collects drops. This avoids walking to one generic block while attempting to mine a different buried coordinate. Buried/unreachable matches are skipped; when none are currently reachable, the process falls back to a short bounded dig so the next observation can discover newly exposed ore.
+- The targeted-mine fallback is a direction-aware walkable stair: it clears and verifies the upper sight line, head space, and foot block, walks into each finished segment, and only then descends. Block breaking aims at the player-facing surface (or the top face for a lower stair block), avoiding floor/ceiling edge collisions. If every descending tread is unsupported or liquid, it selects an unopened same-level direction with solid support and strip-mines around the aquifer instead of retrying an impossible path or teleporting.
 - `/survival/craftTool` and `/survival/craftMaterial` generate inventory/workbench crafting chains, including basic prerequisite steps such as planks, sticks, crafting table crafting, and crafting table placement when needed.
+- Crafting-table prerequisites require a reachable placed table. A carried table is placed in a nearby supported, visible, non-colliding air block after a hotbar-sync delay, then opened through the normal player UI.
 - `/survival/dig` generates a bounded block-by-block mining process for pits/holes.
 - `/survival/build` generates a basic house placement plan with floor, walls, doorway, optional roof, missing-block analysis, optional nearby-storage material staging, optional build-area clearing, and post-placement verification.
+- Its default 3×3 origin starts two blocks ahead. When clearing is enabled, PlayerProbe opens a full-height near-side construction face, clears the complete building volume (including doorway and interior air) in reachable depth slices, approaches far targets within the conservative 4.35-block interaction range, and returns to the outside construction stand before placing blocks. This supports both surface houses and an underground cobblestone bunker.
+- Block placement is idempotent: a target already containing the requested block is accepted as complete, and verified world state wins over a stale/failing interaction result. Interrupted builds can therefore resume instead of repeatedly failing on their first previously placed block.
 - `/survival/enchant` exposes experience/lapis/table checks and a preparation chain for opening a nearby or placed enchanting table. Final option selection can be completed with the lower-level container interfaces after the screen is open.
 - `/survival/smelt`, `/survival/brew`, `/survival/anvil`, `/survival/trade`, and `/storage/organize` use the real container UI plus quick-move/click primitives. Exact slot choice remains visible to the LLM through `/container`.
 - `/container/semantic`, `/container/clickRole`, `/container/button`, `/container/text`, and `/container/moveToSlot` expose UI-specific role maps, precise slot moves, role slot item snapshots, screen/menu metadata, anvil rename text, enchant costs/clues, merchant trade metadata, furnace/brewing progress metadata, and menu-button operations for furnace, brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.

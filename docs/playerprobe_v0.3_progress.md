@@ -82,8 +82,12 @@ what still needs to be finished for the Minecraft AI player mod.
   - `craftTableProcessAutoRepair`
 - Survival process endpoints added:
   - `/survival/chopTree`
+  - Targeted `/survival/mine` now uses exact per-block visible-path, best-tool, mine, wait, verify, and final pickup stages instead of a generic block-type approach.
+  - Its no-visible-target fallback is now a verified, direction-aware stair with upper-sight/head/foot clearance and real movement between segments instead of a rectangular pit; an all-liquid/unsupported descent switches to a supported same-level tunnel until descent is possible again.
   - `/survival/dig`
   - `/survival/build`
+    - `clearArea` opens a full-height construction face, clears doorway/interior volume in near-to-far slices, approaches targets inside the safe interaction range, and returns to the outside build stand.
+    - Placement is idempotent, so an interrupted build accepts already-correct blocks and resumes at the remaining positions.
   - `/survival/craftTool`
   - `/survival/craftMaterial`
   - `/survival/enchant`
