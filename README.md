@@ -409,3 +409,12 @@ Rebuild without Gradle:
 ```bash
 ./scripts/build-finalmod.sh
 ```
+
+### Player-like safety behavior
+
+- `POST /action/respawn` cancels the dead player's previous task/action and requests the vanilla respawn flow.
+- Mining keeps the vanilla destroy process active and visibly swings the main hand; it still refuses an obstructed first hit.
+- Combat walks into melee range, turns smoothly, requires a clear entity raycast, then attacks with normal hand swings.
+- World actions automatically close an open inventory/container before movement, looking, mining, combat, interaction, use, placement, or pickup.
+- Set `pauseOnLostFocus:false` in the instance `options.txt` so autonomous movement continues while Live2D/OBS/HanwenOS has focus.
+- Ordinary movement never teleports. A three-block emergency relocation is internal-only and requires the same-position stuck state to recur at least three times for at least ten seconds after normal recovery is exhausted.

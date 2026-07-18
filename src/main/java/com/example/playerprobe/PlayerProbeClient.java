@@ -12,6 +12,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.DeathScreen;
 import net.minecraft.client.gui.screens.LevelLoadingScreen;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
@@ -39,7 +40,7 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.npc.villager.Villager;
 import net.minecraft.world.entity.npc.villager.VillagerData;
@@ -137,6 +138,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
     private final ArrayDeque<JsonObject> explorationMarkers = new ArrayDeque<>();
     private boolean explorationMarkersLoaded = false;
     private ObservationSnapshot lastObservation;
+    private Vec3 continuousStuckPosition;
+    private long continuousStuckSinceMs;
+    private int continuousStuckEvents;
 
     @Override
     public void onInitializeClient() {
@@ -171,6 +175,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/menu/worlds/switch", this::handleMenuSwitchWorld);
             server.createContext("/action/status", this::handleActionStatus);
             server.createContext("/action/stop", this::handleActionStop);
+            server.createContext("/action/respawn", this::handleActionRespawn);
             server.createContext("/action/look", this::handleActionLook);
             server.createContext("/action/lookAt", this::handleActionLookAt);
             server.createContext("/action/move", this::handleActionMove);
@@ -655,6 +660,46 @@ public final class PlayerProbeClient implements ClientModInitializer {
         sendJson(exchange, 200, root);
     }
 
+    private void handleActionRespawn(HttpExchange exchange) throws IOException {
+        if (!isPost(exchange)) {
+            sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        JsonObject result = runOnGameThread(client -> {
+            LocalPlayer player = client.player;
+            if (player == null) {
+                return errorJson("PlayerNotReady", "No local player is available to respawn.");
+            }
+            boolean dead = player.isDeadOrDying() || player.getHealth() <= 0.0F || client.screen instanceof DeathScreen;
+            if (!dead) {
+                JsonObject root = new JsonObject();
+                root.addProperty("ok", true);
+                root.addProperty("respawnRequested", false);
+                root.addProperty("message", "Player is already alive.");
+                root.add("player", playerJson(player));
+                return root;
+            }
+
+            taskState = taskState.running() ? taskState.cancelled("cancelled by respawn") : taskState;
+            actionState = ActionState.idle("cancelled by respawn");
+            controlledInput.clear();
+            restoreNormalInput(player);
+            resetContinuousStuckTracking();
+            player.respawn();
+            client.setScreen(null);
+
+            JsonObject root = new JsonObject();
+            root.addProperty("ok", true);
+            root.addProperty("respawnRequested", true);
+            root.addProperty("screen", screenName(client.screen));
+            addEvent("respawn_requested", event -> event.addProperty("source", "action/respawn"));
+            return root;
+        });
+
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
+    }
+
     private void handleActionLook(HttpExchange exchange) throws IOException {
         if (!isPost(exchange)) {
             sendText(exchange, 405, "Only POST is supported.\n", "text/plain; charset=utf-8");
@@ -667,6 +712,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             if (player == null || client.level == null) {
                 return errorJson("PlayerNotReady", "Enter a world first.");
             }
+            closeOpenScreenForWorldAction(client);
 
             float yaw;
             float pitch;
@@ -720,6 +766,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             if (player == null || level == null) {
                 return errorJson("PlayerNotReady", "Enter a world first.");
             }
+            closeOpenScreenForWorldAction(client);
 
             Vec3 target = resolveLookTarget(client, request);
             if (target == null) {
@@ -744,22 +791,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         JsonObject request = readJsonObject(exchange);
-        int durationMs = clamp(getInt(request, "durationMs", 500), 50, 30000);
-        ManualControl control = new ManualControl(
-            getBoolean(request, "forward", false),
-            getBoolean(request, "backward", false),
-            getBoolean(request, "left", false),
-            getBoolean(request, "right", false),
-            getBoolean(request, "jump", false),
-            getBoolean(request, "shift", false),
-            getBoolean(request, "sprint", false)
-        );
-
-        actionState = ActionState.manual(control, System.currentTimeMillis() + durationMs, "manual movement");
-
-        JsonObject root = actionState.toJson();
-        root.addProperty("ok", true);
-        sendJson(exchange, 200, root);
+        JsonObject result = runOnGameThread(client -> runActionMoveTask(client, request));
+        sendJson(exchange, result.has("error") ? 409 : 200, result);
     }
 
     private void handleActionPlanPath(HttpExchange exchange) throws IOException {
@@ -786,6 +819,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             if (player == null || level == null) {
                 return errorJson("PlayerNotReady", "Enter a world first.");
             }
+            closeOpenScreenForWorldAction(client);
 
             BlockPos target = blockPosFromJson(request, player.blockPosition());
             int searchRadius = clamp(getInt(request, "radius", 24), 1, MAX_ACTION_RADIUS);
@@ -816,7 +850,6 @@ public final class PlayerProbeClient implements ClientModInitializer {
             if (player == null || level == null) {
                 return errorJson("PlayerNotReady", "Enter a world first.");
             }
-
             String id = getString(request, "id", "minecraft:stone");
             int radius = clamp(getInt(request, "radius", 16), 1, MAX_ACTION_RADIUS);
             Optional<BlockPos> found = findNearestBlock(level, player.blockPosition(), id, radius);
@@ -881,6 +914,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             if (player == null || level == null) {
                 return errorJson("PlayerNotReady", "Enter a world first.");
             }
+            closeOpenScreenForWorldAction(client);
 
             String id = getString(request, "id", "minecraft:stone");
             int radius = clamp(getInt(request, "radius", 16), 1, MAX_ACTION_RADIUS);
@@ -1019,19 +1053,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
 
-        JsonObject result = runOnGameThread(client -> {
-            LocalPlayer player = client.player;
-            if (player == null) {
-                return errorJson("PlayerNotReady", "Enter a world first.");
-            }
-
-            player.sendOpenInventory();
-            JsonObject root = new JsonObject();
-            root.addProperty("ok", true);
-            root.addProperty("screen", screenName(client.screen));
-            root.add("menu", currentContainerJson(player));
-            return root;
-        });
+        JsonObject result = runOnGameThread(this::runOpenInventoryTask);
 
         sendJson(exchange, result.has("error") ? 503 : 200, result);
     }
@@ -1388,21 +1410,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
 
-        JsonObject result = runOnGameThread(client -> {
-            if (client.screen == null) {
-                JsonObject root = new JsonObject();
-                root.addProperty("ok", true);
-                root.addProperty("screen", "none");
-                return root;
-            }
-
-            client.screen.onClose();
-            JsonObject root = new JsonObject();
-            root.addProperty("ok", true);
-            root.addProperty("screen", screenName(client.screen));
-            root.add("menu", createMenuStatus(client));
-            return root;
-        });
+        JsonObject result = runOnGameThread(this::runCloseScreenTask);
 
         sendJson(exchange, result.has("error") ? 503 : 200, result);
     }
@@ -1740,6 +1748,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             controlledInput.clear();
             return;
         }
+        if (player.isDeadOrDying() || player.getHealth() <= 0.0F || client.screen instanceof DeathScreen) {
+            controlledInput.clear();
+            restoreNormalInput(player);
+            return;
+        }
 
         tickTask(client);
 
@@ -1748,6 +1761,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
             restoreNormalInput(player);
             return;
         }
+
+        closeOpenScreenForWorldAction(client);
+        resetContinuousStuckIfMoved(player.position());
 
         installControlledInput(player);
         if (state.kind() == ActionKind.MANUAL) {
@@ -1876,10 +1892,35 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (!taskState.autoRecoverStuck()) {
             return false;
         }
+        noteContinuousStuck(client.player == null ? null : client.player.position());
         if (!taskState.canAutoRecover()) {
+            JsonObject teleport = attemptEmergencyStuckTeleport(client);
+            if (teleport != null) {
+                JsonObject retry = retryableTaskStep(retryStep);
+                if (retry != null) {
+                    taskState.insertStepsAfterCurrent(List.of(retry));
+                }
+                JsonObject event = new JsonObject();
+                event.addProperty("ok", true);
+                event.addProperty("emergencyTeleport", true);
+                event.addProperty("stepIndex", currentStepIndex);
+                event.addProperty("phase", phase);
+                event.addProperty("reason", "same_position_stuck_after_recovery_exhausted");
+                event.add("teleport", teleport);
+                event.add("stuckAction", state.toJson());
+                taskState.recordStep(event);
+                actionState = ActionState.idle("continuous stuck emergency teleport completed");
+                controlledInput.clear();
+                if (client.player != null) {
+                    restoreNormalInput(client.player);
+                }
+                return true;
+            }
             JsonObject failure = errorJson("TaskStuck", "Action is stuck and automatic recovery attempts are exhausted.");
             failure.addProperty("stepIndex", currentStepIndex);
             failure.addProperty("phase", phase);
+            failure.addProperty("continuousStuckEvents", continuousStuckEvents);
+            failure.addProperty("continuousStuckMs", continuousStuckSinceMs == 0L ? 0L : System.currentTimeMillis() - continuousStuckSinceMs);
             failure.add("action", state.toJson());
             taskState = taskState.failed("Task stopped because the action is stuck.", failure);
             actionState = ActionState.idle("stuck action stopped after recovery attempts were exhausted");
@@ -1923,6 +1964,79 @@ public final class PlayerProbeClient implements ClientModInitializer {
             restoreNormalInput(client.player);
         }
         return true;
+    }
+
+    private void noteContinuousStuck(Vec3 position) {
+        if (position == null) {
+            resetContinuousStuckTracking();
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (continuousStuckPosition == null || continuousStuckPosition.distanceTo(position) > 0.75D) {
+            continuousStuckPosition = position;
+            continuousStuckSinceMs = now;
+            continuousStuckEvents = 1;
+            return;
+        }
+        continuousStuckEvents++;
+    }
+
+    private void resetContinuousStuckIfMoved(Vec3 position) {
+        if (continuousStuckPosition != null && position.distanceTo(continuousStuckPosition) > 1.25D) {
+            resetContinuousStuckTracking();
+        }
+    }
+
+    private void resetContinuousStuckTracking() {
+        continuousStuckPosition = null;
+        continuousStuckSinceMs = 0L;
+        continuousStuckEvents = 0;
+    }
+
+    private JsonObject attemptEmergencyStuckTeleport(Minecraft client) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        long now = System.currentTimeMillis();
+        if (player == null || level == null || continuousStuckPosition == null || continuousStuckEvents < 3
+            || continuousStuckSinceMs == 0L || now - continuousStuckSinceMs < 10000L
+            || continuousStuckPosition.distanceTo(player.position()) > 0.75D) {
+            return null;
+        }
+
+        BlockPos origin = player.blockPosition();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (BlockPos pos : BlockPos.betweenClosed(origin.offset(-3, -2, -3), origin.offset(3, 2, 3))) {
+            BlockPos candidate = pos.immutable();
+            if (candidate.distChessboard(origin) >= 2 && isStandable(level, candidate)) {
+                candidates.add(candidate);
+            }
+        }
+        candidates.sort(Comparator.comparingInt(pos -> pos.distManhattan(origin)));
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        Vec3 from = player.position();
+        BlockPos destination = candidates.get(0);
+        Vec3 to = destination.getBottomCenter();
+        player.setPos(to.x, to.y, to.z);
+        player.setDeltaMovement(Vec3.ZERO);
+        player.setJumping(false);
+
+        JsonObject root = new JsonObject();
+        root.addProperty("allowed", true);
+        root.addProperty("continuousStuckEvents", continuousStuckEvents);
+        root.addProperty("continuousStuckMs", now - continuousStuckSinceMs);
+        root.addProperty("maxDistance", 3);
+        root.add("from", vecJson(from));
+        root.add("to", vecJson(to));
+        addEvent("emergency_stuck_teleport", event -> {
+            event.add("from", vecJson(from));
+            event.add("to", vecJson(to));
+            event.addProperty("continuousStuckEvents", continuousStuckEvents);
+        });
+        resetContinuousStuckTracking();
+        return root;
     }
 
     private JsonObject retryableTaskStep(JsonObject step) {
@@ -2034,7 +2148,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             restoreNormalInput(player);
             return;
         }
-        if (System.currentTimeMillis() - state.startedAtMs() > 20000L) {
+        long now = System.currentTimeMillis();
+        if (now - state.startedAtMs() > 20000L) {
             state.markStuck("mine_taking_too_long");
         }
 
@@ -2064,6 +2179,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
             }
             state.markDestroyStarted();
         }
+        if (now >= state.untilMs()) {
+            player.swing(InteractionHand.MAIN_HAND);
+            state.markNextSwing(now + 250L);
+        }
         gameMode.continueDestroyBlock(target, face);
         controlledInput.set(ManualControl.stop());
     }
@@ -2084,14 +2203,48 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
 
-        lookAt(player, target.position().add(0.0D, target.getBbHeight() * 0.5D, 0.0D));
-        controlledInput.set(ManualControl.stop());
-
         long now = System.currentTimeMillis();
+        Vec3 aim = target.position().add(0.0D, target.getBbHeight() * 0.5D, 0.0D);
+        double distance = player.distanceTo(target);
+        boolean facingTarget = smoothLookAt(player, aim, 10.0F, 8.0F, 12.0F);
+        if (distance > 3.1D) {
+            state.observeProgress(distance, "attack_target_not_getting_closer", 4000L);
+            boolean chase = facingTarget && distance <= 12.0D;
+            boolean jump = chase && shouldJumpOverSmallObstacle(player);
+            controlledInput.set(new ManualControl(chase, false, false, false, jump, false, chase));
+            player.setJumping(jump);
+            if (distance > 12.0D || now - state.startedAtMs() > 12000L) {
+                state.markStuck("attack_target_out_of_reach");
+            }
+            if (state.stuck() && !taskState.running()) {
+                actionState = ActionState.idle("attack stopped: target could not be reached");
+                restoreNormalInput(player);
+            }
+            return;
+        }
+
+        controlledInput.set(ManualControl.stop());
+        if (!facingTarget) {
+            return;
+        }
+        HitResult sight = player.raycastHitResult(1.0F, player);
+        if (!(sight instanceof EntityHitResult entityHit) || !entityHit.getEntity().getUUID().equals(target.getUUID())) {
+            boolean strafeLeft = ((now - state.startedAtMs()) / 1200L) % 2L == 0L;
+            boolean jump = shouldJumpOverSmallObstacle(player);
+            controlledInput.set(new ManualControl(false, false, strafeLeft, !strafeLeft, jump, false, false));
+            player.setJumping(jump);
+            state.observeProgress(1.0D, "attack_target_obstructed", 6000L);
+            if (state.stuck() && !taskState.running()) {
+                actionState = ActionState.idle("attack stopped: target is obstructed");
+                restoreNormalInput(player);
+            }
+            return;
+        }
+
         if (now >= state.untilMs()) {
             gameMode.attack(player, target);
             player.swing(InteractionHand.MAIN_HAND);
-            state.markAttackSwing(now + 650L);
+            state.markNextSwing(now + 650L);
             state.decrementAttacksRemaining();
         }
 
@@ -3087,6 +3240,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         BlockPos playerBlock = player.blockPosition();
+        root.addProperty("inWorld", true);
+        root.addProperty("playerReady", true);
+        root.addProperty("screen", screenName(client.screen));
         root.add("world", worldJson(level));
         root.add("player", playerJson(player));
         root.add("playerBlock", blockPosJson(playerBlock));
@@ -3129,6 +3285,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("horizontalFacing", Direction.fromYRot(player.getYRot()).getName());
         root.addProperty("health", player.getHealth());
         root.addProperty("maxHealth", player.getMaxHealth());
+        root.addProperty("dead", player.isDeadOrDying() || player.getHealth() <= 0.0F);
         root.addProperty("armor", player.getArmorValue());
         root.addProperty("food", player.getFoodData().getFoodLevel());
         root.addProperty("hunger", player.getFoodData().getFoodLevel());
@@ -3228,7 +3385,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.add("pos", vecJson(entity.position()));
         root.addProperty("distance", Math.sqrt(player.distanceToSqr(entity)));
         root.addProperty("onGround", entity.onGround());
-        root.addProperty("hostile", entity instanceof Mob mob && mob.canAttack(player));
+        root.addProperty("hostile", entity instanceof Enemy);
         root.addProperty("living", entity instanceof LivingEntity);
         if (entity instanceof LivingEntity living) {
             root.addProperty("health", living.getHealth());
@@ -4639,9 +4796,13 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (target == null) {
             return steps;
         }
-        JsonObject equip = taskStep("equipBest");
-        equip.addProperty("purpose", "combat");
-        steps.add(equip);
+        JsonObject combatEquipmentRequest = new JsonObject();
+        combatEquipmentRequest.addProperty("purpose", "combat");
+        if (findBestSlotForPurpose(player, level, "combat", combatEquipmentRequest) >= 0) {
+            JsonObject equip = taskStep("equipBest");
+            equip.addProperty("purpose", "combat");
+            steps.add(equip);
+        }
         if (getBoolean(request, "useShield", true) && inventoryCount(player.getInventory(), "minecraft:shield") > 0) {
             JsonObject shield = taskStep("useItem");
             shield.addProperty("hand", "off");
@@ -4650,17 +4811,26 @@ public final class PlayerProbeClient implements ClientModInitializer {
             brace.addProperty("durationMs", clamp(getInt(request, "shieldMs", 400), 100, 3000));
             steps.add(brace);
         }
-        JsonObject go = taskStep("goto");
-        BlockPos near = target.blockPosition();
-        go.addProperty("x", near.getX());
-        go.addProperty("y", near.getY());
-        go.addProperty("z", near.getZ());
-        go.addProperty("radius", clamp(getInt(request, "pathRadius", 24), 1, MAX_ACTION_RADIUS));
-        steps.add(go);
-        steps.add(waitForActionIdleStep(20000));
+        if (player.distanceTo(target) > 10.0D) {
+            int pathRadius = clamp(getInt(request, "pathRadius", 24), 1, MAX_ACTION_RADIUS);
+            Optional<PathToBlock> approach = findPathToStandNear(level, player.blockPosition(), target.blockPosition(), pathRadius, 2);
+            if (approach.isEmpty()) {
+                return steps;
+            }
+            if (!approach.get().path().isEmpty()) {
+                JsonObject go = taskStep("goto");
+                BlockPos near = approach.get().standPos();
+                go.addProperty("x", near.getX());
+                go.addProperty("y", near.getY());
+                go.addProperty("z", near.getZ());
+                go.addProperty("radius", pathRadius);
+                steps.add(go);
+                steps.add(waitForActionIdleStep(20000));
+            }
+        }
         JsonObject attack = taskStep("attackEntity");
         attack.addProperty("entityUuid", target.getUUID().toString());
-        attack.addProperty("count", clamp(getInt(request, "hits", 3), 1, 20));
+        attack.addProperty("count", clamp(getInt(request, "hits", 8), 1, 20));
         steps.add(attack);
         steps.add(waitForActionIdleStep(15000));
         if (getBoolean(request, "kite", false)) {
@@ -5630,7 +5800,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         entities.sort(Comparator.comparingDouble(player::distanceToSqr));
         for (Entity entity : entities) {
             String entityType = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
-            boolean hostile = entity instanceof Mob mob && mob.canAttack(player);
+            boolean hostile = entity instanceof Enemy;
             if (hostileOnly && !hostile) {
                 continue;
             }
@@ -6449,10 +6619,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "enchantPrepareProcess" -> runGeneratedSurvivalProcessTask(client, "enchantPrepareProcess", survivalEnchantSteps(client, stepRequest));
             case "enchantApplyProcess" -> runGeneratedSurvivalProcessTask(client, "enchantApplyProcess", survivalEnchantApplySteps(client, stepRequest));
             case "lookAt" -> runActionLookAtTask(client, stepRequest);
-            case "move" -> runActionMoveTask(stepRequest);
+            case "move" -> runActionMoveTask(client, stepRequest);
             case "goto" -> runActionGotoTask(client, stepRequest);
             case "gotoBlock" -> runActionGotoBlockTask(client, stepRequest);
             case "gotoVisibleBlock" -> runGotoVisibleBlockTask(client, stepRequest);
+            case "attackEntity" -> actionAttackEntityInternal(client, stepRequest);
             case "interact" -> runActionInteractTask(client, stepRequest);
             case "craft" -> craftFromRequest(client, stepRequest);
             case "useItem" -> runActionUseItemTask(client, stepRequest);
@@ -7752,6 +7923,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
         Vec3 target = resolveLookTarget(client, request);
         if (target == null) {
             return errorJson("TargetNotFound", "Could not resolve look target.");
@@ -7764,7 +7936,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return root;
     }
 
-    private JsonObject runActionMoveTask(JsonObject request) {
+    private JsonObject runActionMoveTask(Minecraft client, JsonObject request) {
+        if (client.player == null || client.level == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+        closeOpenScreenForWorldAction(client);
         int durationMs = clamp(getInt(request, "durationMs", 500), 50, 30000);
         ManualControl control = new ManualControl(
             getBoolean(request, "forward", false),
@@ -7791,6 +7967,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null || gameMode == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         BlockPos target = blockPosFromJson(request, player.blockPosition());
         BlockState state = level.getBlockState(target);
@@ -7834,6 +8011,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null || gameMode == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         Entity target = resolveEntity(client, request);
         if (target == null) {
@@ -7850,10 +8028,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
             step.add("target", entityJson(player, target));
         }));
 
-        lookAt(player, target.position().add(0.0D, target.getBbHeight() * 0.5D, 0.0D));
         steps.add(stepJson("look_at_target", step -> {
             step.addProperty("ok", true);
-            step.add("raycast", raycastJson(client, player, level, 6));
+            step.addProperty("mode", "smooth_during_chase_and_attack");
         }));
         actionState = ActionState.attack(target.getId(), target.getUUID().toString(), count, "attackEntity " + target.getName().getString());
         steps.add(stepJson("start_attack", step -> {
@@ -7877,6 +8054,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null || gameMode == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         InteractionHand hand = parseHand(getString(request, "hand", "main"));
         JsonArray steps = new JsonArray();
@@ -7927,6 +8105,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null || gameMode == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         JsonArray steps = new JsonArray();
         if (request.has("slot")) {
@@ -7956,6 +8135,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null || gameMode == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         JsonArray steps = new JsonArray();
         if (request.has("slot")) {
@@ -8017,6 +8197,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         int radius = clamp(getInt(request, "radius", 6), 1, 24);
         int timeoutMs = clamp(getInt(request, "timeoutMs", 3000), 200, 30000);
@@ -8056,6 +8237,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
         BlockPos target = blockPosFromJson(request, player.blockPosition());
         int radius = clamp(getInt(request, "radius", 24), 1, MAX_ACTION_RADIUS);
         Optional<PathToBlock> visiblePath = findPathToVisibleBlock(level, player, target, radius);
@@ -8106,7 +8288,25 @@ public final class PlayerProbeClient implements ClientModInitializer {
         JsonObject root = new JsonObject();
         root.addProperty("ok", true);
         root.addProperty("screen", screenName(client.screen));
+        root.add("menu", createMenuStatus(client));
         return root;
+    }
+
+    private boolean closeOpenScreenForWorldAction(Minecraft client) {
+        Screen screen = client.screen;
+        if (screen == null || screen instanceof DeathScreen) {
+            return false;
+        }
+        String closedScreen = screenName(screen);
+        if (client.player != null && client.player.containerMenu != client.player.inventoryMenu) {
+            client.player.closeContainer();
+        }
+        client.setScreen(null);
+        addEvent("screen_auto_closed", event -> {
+            event.addProperty("screen", closedScreen);
+            event.addProperty("reason", "world_action_started");
+        });
+        return true;
     }
 
     private JsonObject startGotoAction(Minecraft client, JsonObject request) {
@@ -8115,6 +8315,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         BlockPos target = blockPosFromJson(request, player.blockPosition());
         int searchRadius = clamp(getInt(request, "radius", 24), 1, MAX_ACTION_RADIUS);
@@ -8138,6 +8339,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (player == null || level == null) {
             return errorJson("PlayerNotReady", "Enter a world first.");
         }
+        closeOpenScreenForWorldAction(client);
 
         String id = getString(request, "id", getString(request, "blockId", "minecraft:stone"));
         int radius = clamp(getInt(request, "radius", 16), 1, MAX_ACTION_RADIUS);
@@ -10285,8 +10487,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return attacksRemaining;
         }
 
-        void markAttackSwing(long nextAttackAtMs) {
-            this.untilMs = nextAttackAtMs;
+        void markNextSwing(long nextSwingAtMs) {
+            this.untilMs = nextSwingAtMs;
         }
 
         void decrementAttacksRemaining() {
