@@ -151,6 +151,15 @@ what still needs to be finished for the Minecraft AI player mod.
   villager interaction opening, fishing, brewing stand opening/filling, anvil
   opening, and waypoint exploration.
 - v0.3 UI/control hardening:
+  - Camera and path-facing changes are interpolated across client ticks rather
+    than snapping directly to the requested yaw/pitch.
+  - Survival inventory/workbench crafting now stays visible across explicit
+    open, screen wait, recipe placement, result pickup, and close steps.
+  - Workbench interaction waits for the asynchronous `CraftingScreen` instead
+    of treating the same-tick menu state as a failure.
+  - Mining enforces normal reach and first-hit line of sight; tree chopping
+    finds a reachable visible side for each log instead of targeting through
+    leaves.
   - `/container/semantic` exposes role-to-slot/button mappings for furnace,
     brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.
   - `/container/clickRole` and `/container/button` let LLMs operate UI roles

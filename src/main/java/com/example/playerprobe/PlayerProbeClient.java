@@ -670,26 +670,37 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
             float yaw;
             float pitch;
+            Vec3 target;
             if (hasNumber(request, "x") && hasNumber(request, "y") && hasNumber(request, "z")) {
-                LookAngles angles = calculateLookAngles(player.getEyePosition(), new Vec3(
+                target = new Vec3(
                     request.get("x").getAsDouble(),
                     request.get("y").getAsDouble(),
                     request.get("z").getAsDouble()
-                ));
+                );
+                LookAngles angles = calculateLookAngles(player.getEyePosition(), target);
                 yaw = angles.yaw();
                 pitch = angles.pitch();
             } else {
                 yaw = getFloat(request, "yaw", player.getYRot());
                 pitch = getFloat(request, "pitch", player.getXRot());
+                double yawRadians = Math.toRadians(yaw);
+                double pitchRadians = Math.toRadians(pitch);
+                double horizontal = Math.cos(pitchRadians);
+                Vec3 direction = new Vec3(
+                    -Math.sin(yawRadians) * horizontal,
+                    -Math.sin(pitchRadians),
+                    Math.cos(yawRadians) * horizontal
+                );
+                target = player.getEyePosition().add(direction.scale(10.0D));
             }
 
-            applyLook(player, yaw, pitch);
-            actionState = ActionState.idle("look applied");
+            actionState = ActionState.look(target, "smooth look");
 
             JsonObject root = new JsonObject();
             root.addProperty("ok", true);
-            root.addProperty("yaw", player.getYRot());
-            root.addProperty("pitch", player.getXRot());
+            root.addProperty("targetYaw", yaw);
+            root.addProperty("targetPitch", pitch);
+            root.add("action", actionState.toJson());
             return root;
         });
 
@@ -715,14 +726,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 return errorJson("TargetNotFound", "Could not resolve look target.");
             }
 
-            lookAt(player, target);
-            actionState = ActionState.idle("lookAt applied");
+            actionState = ActionState.look(target, "smooth lookAt");
 
             JsonObject root = new JsonObject();
             root.addProperty("ok", true);
-            root.addProperty("yaw", player.getYRot());
-            root.addProperty("pitch", player.getXRot());
-            root.add("raycast", raycastJson(client, player, level, 6));
+            root.add("action", actionState.toJson());
             return root;
         });
 
@@ -1750,6 +1758,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 return;
             }
             controlledInput.set(state.manual());
+            player.setJumping(state.manual().jump());
             return;
         }
 
@@ -1759,6 +1768,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 return;
             }
             tickPath(player, state);
+            return;
+        }
+
+        if (state.kind() == ActionKind.LOOK) {
+            tickLook(player, state);
             return;
         }
 
@@ -1951,9 +1965,24 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
 
-        lookAt(player, new Vec3(target.x, player.getEyePosition().y, target.z));
+        Vec3 walkTarget = new Vec3(target.x, player.getEyePosition().y, target.z);
+        boolean facingPath = smoothLookAt(player, walkTarget, 8.0F, 6.0F, 24.0F);
         boolean jump = dy > 0.1D || shouldJumpOverSmallObstacle(player);
-        controlledInput.set(new ManualControl(true, false, false, false, jump, false, true));
+        controlledInput.set(new ManualControl(facingPath, false, false, false, facingPath && jump, false, facingPath));
+        player.setJumping(facingPath && jump);
+    }
+
+    private void tickLook(LocalPlayer player, ActionState state) {
+        Vec3 target = state.lookPosition();
+        if (target == null) {
+            actionState = ActionState.idle("look cancelled");
+            return;
+        }
+        controlledInput.set(ManualControl.stop());
+        if (smoothLookAt(player, target, 6.0F, 4.0F, 1.25F)) {
+            lookAt(player, target);
+            actionState = ActionState.idle("look finished");
+        }
     }
 
     private void tickPickup(Minecraft client, LocalPlayer player, ActionState state) {
@@ -1985,6 +2014,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         lookAt(player, new Vec3(target.x, player.getEyePosition().y, target.z));
         boolean jump = shouldJumpOverSmallObstacle(player);
         controlledInput.set(new ManualControl(true, false, false, false, jump, false, true));
+        player.setJumping(jump);
     }
 
     private void tickMine(Minecraft client, LocalPlayer player, ActionState state) {
@@ -2008,8 +2038,32 @@ public final class PlayerProbeClient implements ClientModInitializer {
             state.markStuck("mine_taking_too_long");
         }
 
+        if (player.getEyePosition().distanceTo(target.getCenter()) > 5.0D) {
+            state.markStuck("mine_target_out_of_reach");
+            actionState = ActionState.idle("mine stopped: target out of reach");
+            restoreNormalInput(player);
+            return;
+        }
         Direction face = state.targetFace() == null ? resolveBlockFace(player, target) : state.targetFace();
-        lookAt(player, target.getCenter());
+        if (!smoothLookAt(player, target.getCenter(), 7.0F, 5.0F, 3.0F)) {
+            controlledInput.set(ManualControl.stop());
+            return;
+        }
+        HitResult sight = player.raycastHitResult(1.0F, player);
+        if (!(sight instanceof BlockHitResult blockHit) || !blockHit.getBlockPos().equals(target)) {
+            gameMode.stopDestroyBlock();
+            actionState = ActionState.idle("mine stopped: another block obstructs the target");
+            restoreNormalInput(player);
+            return;
+        }
+        if (!state.destroyStarted()) {
+            if (!gameMode.startDestroyBlock(target, blockHit.getDirection())) {
+                actionState = ActionState.idle("mine stopped: Minecraft rejected breaking the target");
+                restoreNormalInput(player);
+                return;
+            }
+            state.markDestroyStarted();
+        }
         gameMode.continueDestroyBlock(target, face);
         controlledInput.set(ManualControl.stop());
     }
@@ -2070,6 +2124,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
         originalInput = null;
         controlledInput.clear();
+        if (player != null) {
+            player.setJumping(false);
+        }
     }
 
     private JsonObject createUnifiedStatus(Minecraft client) {
@@ -2804,6 +2861,50 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return Optional.empty();
     }
 
+    private Optional<PathToBlock> findPathToVisibleBlock(ClientLevel level, LocalPlayer player, BlockPos targetBlock, int radius) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (BlockPos pos : BlockPos.betweenClosed(
+            targetBlock.offset(-4, -3, -4),
+            targetBlock.offset(4, 3, 4)
+        )) {
+            BlockPos candidate = pos.immutable();
+            if (candidate.equals(targetBlock) || !isStandable(level, candidate)) {
+                continue;
+            }
+            Vec3 eye = candidate.getBottomCenter().add(0.0D, 1.62D, 0.0D);
+            if (eye.distanceTo(targetBlock.getCenter()) <= 5.0D && hasClearBlockSight(level, eye, targetBlock)) {
+                candidates.add(candidate);
+            }
+        }
+        candidates.sort(Comparator
+            .comparingInt((BlockPos pos) -> pos.distManhattan(player.blockPosition()))
+            .thenComparingDouble(pos -> pos.getCenter().distanceToSqr(targetBlock.getCenter())));
+        for (BlockPos standPos : candidates) {
+            Optional<List<BlockPos>> path = findPath(level, player.blockPosition(), standPos, radius);
+            if (path.isPresent()) {
+                return Optional.of(new PathToBlock(targetBlock, standPos, path.get()));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private boolean hasClearBlockSight(ClientLevel level, Vec3 eye, BlockPos targetBlock) {
+        Vec3 target = targetBlock.getCenter();
+        Vec3 delta = target.subtract(eye);
+        int samples = Math.max(2, (int) Math.ceil(delta.length() * 12.0D));
+        for (int i = 1; i <= samples; i++) {
+            Vec3 point = eye.add(delta.scale(i / (double) samples));
+            BlockPos sample = BlockPos.containing(point);
+            if (sample.equals(targetBlock)) {
+                return true;
+            }
+            if (!level.getBlockState(sample).isAir()) {
+                return false;
+            }
+        }
+        return false;
+    }
+
     private Optional<List<BlockPos>> findPath(ClientLevel level, BlockPos rawStart, BlockPos rawTarget, int radius) {
         BlockPos start = normalizeStandPosition(level, rawStart);
         BlockPos target = normalizeStandPosition(level, rawTarget);
@@ -2917,6 +3018,16 @@ public final class PlayerProbeClient implements ClientModInitializer {
     private void lookAt(LocalPlayer player, Vec3 target) {
         LookAngles angles = calculateLookAngles(player.getEyePosition(), target);
         applyLook(player, angles.yaw(), angles.pitch());
+    }
+
+    private boolean smoothLookAt(LocalPlayer player, Vec3 target, float maxYawStep, float maxPitchStep, float tolerance) {
+        LookAngles desired = calculateLookAngles(player.getEyePosition(), target);
+        float yawDelta = wrapDegrees(desired.yaw() - player.getYRot());
+        float pitchDelta = desired.pitch() - player.getXRot();
+        float nextYaw = player.getYRot() + clampFloat(yawDelta, -maxYawStep, maxYawStep);
+        float nextPitch = player.getXRot() + clampFloat(pitchDelta, -maxPitchStep, maxPitchStep);
+        applyLook(player, nextYaw, nextPitch);
+        return Math.abs(yawDelta) <= tolerance && Math.abs(pitchDelta) <= tolerance;
     }
 
     private LookAngles calculateLookAngles(Vec3 eye, Vec3 target) {
@@ -3837,10 +3948,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         String itemId = resolveToolItemId(request);
         List<JsonObject> steps = new ArrayList<>();
         addCraftingPrerequisiteSteps(steps, player, client.level, itemId);
-        JsonObject craft = taskStep("craftTableProcessAutoRepair");
-        craft.addProperty("itemId", itemId);
-        craft.addProperty("count", clamp(getInt(request, "count", 1), 1, 16));
-        steps.add(craft);
+        addPlayerLikeCraftSteps(steps, itemId, clamp(getInt(request, "count", 1), 1, 16), true);
         return steps;
     }
 
@@ -3853,32 +3961,20 @@ public final class PlayerProbeClient implements ClientModInitializer {
         int count = clamp(getInt(request, "count", 1), 1, 64);
         List<JsonObject> steps = new ArrayList<>();
         if (itemId.endsWith("_planks")) {
-            JsonObject craft = taskStep("craftInventoryProcessAutoRepair");
-            craft.addProperty("itemId", itemId);
-            craft.addProperty("count", count);
-            steps.add(craft);
+            addPlayerLikeCraftSteps(steps, itemId, count, false);
             return steps;
         }
         if ("minecraft:stick".equals(itemId) || "minecraft:crafting_table".equals(itemId)) {
             String plankId = preferredPlanksForInventory(player.getInventory());
             if (inventoryCount(player.getInventory(), plankId) <= 0 && inventoryCountAny(player.getInventory(), logBlockIds()) > 0) {
-                JsonObject planks = taskStep("craftInventoryProcessAutoRepair");
-                planks.addProperty("itemId", preferredPlanksForInventory(player.getInventory()));
-                planks.addProperty("count", 1);
-                steps.add(planks);
+                addPlayerLikeCraftSteps(steps, preferredPlanksForInventory(player.getInventory()), 1, false);
             }
-            JsonObject craft = taskStep("craftInventoryProcessAutoRepair");
-            craft.addProperty("itemId", itemId);
-            craft.addProperty("count", count);
-            steps.add(craft);
+            addPlayerLikeCraftSteps(steps, itemId, count, false);
             return steps;
         }
         if (requiresCraftingTable(itemId)) {
             addCraftingPrerequisiteSteps(steps, player, client.level, itemId);
-            JsonObject craft = taskStep("craftTableProcessAutoRepair");
-            craft.addProperty("itemId", itemId);
-            craft.addProperty("count", count);
-            steps.add(craft);
+            addPlayerLikeCraftSteps(steps, itemId, count, true);
             return steps;
         }
         JsonObject craft = taskStep("craft");
@@ -3913,10 +4009,20 @@ public final class PlayerProbeClient implements ClientModInitializer {
         steps.add(waitForActionIdleStep(20000));
 
         for (BlockPos log : logs) {
+            JsonObject approach = taskStep("gotoVisibleBlock");
+            approach.addProperty("x", log.getX());
+            approach.addProperty("y", log.getY());
+            approach.addProperty("z", log.getZ());
+            approach.addProperty("radius", radius);
+            steps.add(approach);
+            steps.add(waitForActionIdleStep(20000));
+
             JsonObject equip = taskStep("equipBest");
             equip.addProperty("purpose", "mine");
             equip.add("blockPos", blockPosJson(log));
-            steps.add(equip);
+            if (findBestSlotForPurpose(player, level, "mine", equip) >= 0) {
+                steps.add(equip);
+            }
 
             JsonObject mine = taskStep("mineBlock");
             mine.addProperty("x", log.getX());
@@ -5562,24 +5668,24 @@ public final class PlayerProbeClient implements ClientModInitializer {
     private void addCraftingPrerequisiteSteps(List<JsonObject> steps, LocalPlayer player, ClientLevel level, String itemId) {
         Inventory inventory = player.getInventory();
         String plankId = preferredPlanksForInventory(inventory);
-        if (needsWoodParts(itemId) && inventoryCountAny(inventory, plankItemIds()) < 4 && inventoryCountAny(inventory, logBlockIds()) > 0) {
-            JsonObject planks = taskStep("craftInventoryProcessAutoRepair");
-            planks.addProperty("itemId", plankId);
-            planks.addProperty("count", 1);
-            steps.add(planks);
+        int requiredPlanks = requiredPlanksForTool(itemId);
+        if (requiresCraftingTable(itemId) && !hasCraftingTableAccess(level, player)) {
+            requiredPlanks += 4;
         }
         if (needsSticks(itemId) && inventoryCount(inventory, "minecraft:stick") < 2) {
-            JsonObject sticks = taskStep("craftInventoryProcessAutoRepair");
-            sticks.addProperty("itemId", "minecraft:stick");
-            sticks.addProperty("count", 1);
-            steps.add(sticks);
+            requiredPlanks += 2;
+        }
+        int availablePlanks = inventoryCountAny(inventory, plankItemIds());
+        if (requiredPlanks > availablePlanks && inventoryCountAny(inventory, logBlockIds()) > 0) {
+            int plankCrafts = (requiredPlanks - availablePlanks + 3) / 4;
+            addPlayerLikeCraftSteps(steps, plankId, plankCrafts, false);
+        }
+        if (needsSticks(itemId) && inventoryCount(inventory, "minecraft:stick") < 2) {
+            addPlayerLikeCraftSteps(steps, "minecraft:stick", 1, false);
         }
         if (requiresCraftingTable(itemId) && !hasCraftingTableAccess(level, player)) {
             if (inventoryCount(inventory, "minecraft:crafting_table") <= 0) {
-                JsonObject table = taskStep("craftInventoryProcessAutoRepair");
-                table.addProperty("itemId", "minecraft:crafting_table");
-                table.addProperty("count", 1);
-                steps.add(table);
+                addPlayerLikeCraftSteps(steps, "minecraft:crafting_table", 1, false);
             }
             BlockPos tablePos = player.blockPosition().relative(player.getDirection(), 2);
             JsonObject place = taskStep("placeBlock");
@@ -5592,6 +5698,49 @@ public final class PlayerProbeClient implements ClientModInitializer {
             steps.add(place);
             steps.add(waitForActionIdleStep(1000));
         }
+    }
+
+    private int requiredPlanksForTool(String itemId) {
+        String id = normalizeItemId(itemId);
+        if (id.endsWith("_axe") || id.endsWith("_pickaxe")) {
+            return 3;
+        }
+        if (id.endsWith("_sword") || id.endsWith("_hoe")) {
+            return 2;
+        }
+        if (id.endsWith("_shovel")) {
+            return 1;
+        }
+        return needsWoodParts(id) ? 3 : 0;
+    }
+
+    private void addPlayerLikeCraftSteps(List<JsonObject> steps, String itemId, int count, boolean useTable) {
+        String normalized = normalizeItemId(itemId);
+        if (useTable) {
+            steps.add(taskStep("openNearbyCraftingTable"));
+            steps.add(waitForScreenStep("CraftingScreen", 5000));
+        } else {
+            steps.add(taskStep("openInventory"));
+            steps.add(waitForScreenStep("InventoryScreen", 3000));
+        }
+        int runs = clamp(count, 1, 64);
+        for (int i = 0; i < runs; i++) {
+            JsonObject placeRecipe = taskStep("placeCraftRecipe");
+            placeRecipe.addProperty("itemId", normalized);
+            placeRecipe.addProperty("useTable", useTable);
+            steps.add(placeRecipe);
+            JsonObject inspectGrid = taskStep("wait");
+            inspectGrid.addProperty("durationMs", 650);
+            steps.add(inspectGrid);
+            steps.add(taskStep("takeCraftResult"));
+            JsonObject inspectResult = taskStep("wait");
+            inspectResult.addProperty("durationMs", 450);
+            steps.add(inspectResult);
+        }
+        steps.add(taskStep("closeScreen"));
+        JsonObject settle = taskStep("wait");
+        settle.addProperty("durationMs", 250);
+        steps.add(settle);
     }
 
     private JsonObject survivalRequirementsFromRequest(JsonObject request) {
@@ -6269,6 +6418,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "craftInventoryProcessAutoRepair" -> runCraftInventoryProcessAutoRepairTask(client, stepRequest);
             case "craftTableProcess" -> runCraftTableProcessTask(client, stepRequest);
             case "craftTableProcessAutoRepair" -> runCraftTableProcessAutoRepairTask(client, stepRequest);
+            case "placeCraftRecipe" -> runPlaceCraftRecipeTask(client, stepRequest);
+            case "takeCraftResult" -> runTakeCraftResultTask(client);
             case "advancedPathProcess" -> runGeneratedSurvivalProcessTask(client, "advancedPathProcess", survivalAdvancedPathSteps(client, stepRequest));
             case "recoverProcess" -> runGeneratedSurvivalProcessTask(client, "recoverProcess", survivalRecoverSteps(client, stepRequest));
             case "smeltProcess" -> runGeneratedSurvivalProcessTask(client, "smeltProcess", survivalSmeltSteps(client, stepRequest));
@@ -6301,6 +6452,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             case "move" -> runActionMoveTask(stepRequest);
             case "goto" -> runActionGotoTask(client, stepRequest);
             case "gotoBlock" -> runActionGotoBlockTask(client, stepRequest);
+            case "gotoVisibleBlock" -> runGotoVisibleBlockTask(client, stepRequest);
             case "interact" -> runActionInteractTask(client, stepRequest);
             case "craft" -> craftFromRequest(client, stepRequest);
             case "useItem" -> runActionUseItemTask(client, stepRequest);
@@ -6818,6 +6970,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
 
         player.sendOpenInventory();
+        if (!(client.screen instanceof InventoryScreen)) {
+            client.setScreen(new InventoryScreen(player));
+        }
         JsonObject root = new JsonObject();
         root.addProperty("ok", true);
         root.addProperty("screen", screenName(client.screen));
@@ -7295,12 +7450,28 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 step.addProperty("ok", true);
                 step.addProperty("pathLength", path.path().size());
             }));
+            taskState.insertStepsAfterCurrent(List.of(taskStep("openNearbyCraftingTable")));
             taskState.startActionIdleWait(clamp(getInt(request, "timeoutMs", 15000), 0, 120000));
             JsonObject root = new JsonObject();
             root.addProperty("ok", true);
             root.addProperty("processMode", "player_like");
             root.addProperty("waitingForActionIdle", true);
             root.add("steps", steps);
+            root.add("action", actionState.toJson());
+            return root;
+        }
+
+        if (!getBoolean(request, "afterLook", false)) {
+            JsonObject retry = taskStep("openNearbyCraftingTable");
+            retry.addProperty("afterLook", true);
+            taskState.insertStepsAfterCurrent(List.of(retry));
+            actionState = ActionState.look(path.targetBlock().getCenter(), "look at crafting table");
+            taskState.startActionIdleWait(5000);
+            JsonObject root = new JsonObject();
+            root.addProperty("ok", true);
+            root.addProperty("processMode", "player_like");
+            root.addProperty("waitingForActionIdle", true);
+            root.add("tablePos", blockPosJson(path.targetBlock()));
             root.add("action", actionState.toJson());
             return root;
         }
@@ -7548,6 +7719,33 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return root;
     }
 
+    private JsonObject runPlaceCraftRecipeTask(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null || currentCraftingMenu(player) == null) {
+            return errorJson("CraftMenuMissing", "Open the inventory or crafting table before placing a recipe.");
+        }
+        String itemId = normalizeItemId(getString(request, "itemId", ""));
+        RecipeSelection selection = selectRecipeForCraft(client, player, level, itemId, getBoolean(request, "useTable", false));
+        if (selection == null || !selection.entry().canCraft(inventoryContents(player.getInventory()))) {
+            return errorJson("MissingIngredients", "No craftable recipe is available for " + itemId + ".");
+        }
+        JsonObject root = placeRecipeIntoCurrentMenu(client, player, selection, false);
+        root.addProperty("itemId", itemId);
+        root.addProperty("processMode", "player_like_visible");
+        return root;
+    }
+
+    private JsonObject runTakeCraftResultTask(Minecraft client) {
+        LocalPlayer player = client.player;
+        if (player == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+        JsonObject root = takeCraftResult(client, player);
+        root.addProperty("processMode", "player_like_visible");
+        return root;
+    }
+
     private JsonObject runActionLookAtTask(Minecraft client, JsonObject request) {
         LocalPlayer player = client.player;
         ClientLevel level = client.level;
@@ -7558,11 +7756,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (target == null) {
             return errorJson("TargetNotFound", "Could not resolve look target.");
         }
-        lookAt(player, target);
+        actionState = ActionState.look(target, "look at target");
         JsonObject root = new JsonObject();
         root.addProperty("ok", true);
         root.addProperty("processMode", "player_like");
-        root.add("raycast", raycastJson(client, player, level, 6));
+        root.add("action", actionState.toJson());
         return root;
     }
 
@@ -7609,20 +7807,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             step.add("block", blockJson(level, target, null));
         }));
 
-        lookAt(player, target.getCenter());
         steps.add(stepJson("look_at_target", step -> {
             step.addProperty("ok", true);
-            step.add("raycast", raycastJson(client, player, level, 6));
+            step.addProperty("mode", "smooth_during_break");
         }));
 
-        boolean started = gameMode.startDestroyBlock(target, face);
-        if (!started) {
-            JsonObject root = errorJson("MineStartFailed", "Minecraft refused to start breaking the target block.");
-            root.add("steps", steps);
-            return root;
-        }
-
-        gameMode.continueDestroyBlock(target, face);
         actionState = ActionState.mine(target, face, "mineBlock " + target.toShortString());
         steps.add(stepJson("start_breaking", step -> {
             step.addProperty("ok", true);
@@ -7861,6 +8050,28 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return startGotoBlockAction(client, request);
     }
 
+    private JsonObject runGotoVisibleBlockTask(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return errorJson("PlayerNotReady", "Enter a world first.");
+        }
+        BlockPos target = blockPosFromJson(request, player.blockPosition());
+        int radius = clamp(getInt(request, "radius", 24), 1, MAX_ACTION_RADIUS);
+        Optional<PathToBlock> visiblePath = findPathToVisibleBlock(level, player, target, radius);
+        if (visiblePath.isEmpty()) {
+            return errorJson("NoVisiblePath", "No reachable standing position has an unobstructed view of the target block.");
+        }
+        PathToBlock path = visiblePath.get();
+        actionState = ActionState.path(path.path(), target, "goto visible side of " + target.toShortString());
+        JsonObject root = actionState.toJson();
+        root.addProperty("ok", true);
+        root.addProperty("processMode", "player_like_visible");
+        root.add("target", blockPosJson(target));
+        root.add("standPos", blockPosJson(path.standPos()));
+        return root;
+    }
+
     private JsonObject runActionInteractTask(Minecraft client, JsonObject request) {
         return actionInteractInternal(client, request);
     }
@@ -7888,7 +8099,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
             root.addProperty("screen", "none");
             return root;
         }
-        client.screen.onClose();
+        if (client.player != null && client.player.containerMenu != client.player.inventoryMenu) {
+            client.player.closeContainer();
+        }
+        client.setScreen(null);
         JsonObject root = new JsonObject();
         root.addProperty("ok", true);
         root.addProperty("screen", screenName(client.screen));
@@ -7962,14 +8176,18 @@ public final class PlayerProbeClient implements ClientModInitializer {
         lookAt(player, location);
         InteractionResult interaction = client.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, new BlockHitResult(location, face, tablePos, false));
         step.addProperty("interaction", interaction.toString().toLowerCase(Locale.ROOT));
-        step.addProperty("ok", currentCraftingMenu(player) instanceof CraftingMenu);
+        boolean accepted = interaction.consumesAction()
+            || interaction == InteractionResult.SUCCESS
+            || interaction == InteractionResult.SUCCESS_SERVER;
+        step.addProperty("ok", accepted || currentCraftingMenu(player) instanceof CraftingMenu);
+        step.addProperty("awaitingScreen", !(currentCraftingMenu(player) instanceof CraftingMenu));
         step.add("tablePos", blockPosJson(tablePos));
         step.addProperty("screen", screenName(client.screen));
         if (player.containerMenu != null) {
             step.add("menu", currentContainerJson(player));
         }
         if (!step.get("ok").getAsBoolean()) {
-            step.addProperty("message", "Crafting table did not open.");
+            step.addProperty("message", "Minecraft rejected the crafting table interaction.");
         }
         return step;
     }
@@ -9088,6 +9306,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if ("inventory".equals(selection.menuType())) {
             if (!(client.screen instanceof InventoryScreen)) {
                 player.sendOpenInventory();
+                client.setScreen(new InventoryScreen(player));
             }
             step.addProperty("ok", currentCraftingMenu(player) instanceof InventoryMenu);
             step.addProperty("screen", screenName(client.screen));
@@ -9832,6 +10051,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         IDLE,
         MANUAL,
         PATH,
+        LOOK,
         MINE,
         ATTACK
     }
@@ -9898,6 +10118,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private final ManualControl manual;
         private final List<BlockPos> path;
         private final BlockPos lookTarget;
+        private final Vec3 lookPosition;
         private final BlockPos targetBlock;
         private final Direction targetFace;
         private final int targetEntityId;
@@ -9910,6 +10131,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private long lastProgressAtMs;
         private boolean stuck;
         private String stuckReason;
+        private boolean destroyStarted;
 
         private ActionState(
             ActionKind kind,
@@ -9918,6 +10140,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             ManualControl manual,
             List<BlockPos> path,
             BlockPos lookTarget,
+            Vec3 lookPosition,
             BlockPos targetBlock,
             Direction targetFace,
             int targetEntityId,
@@ -9931,6 +10154,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             this.manual = manual;
             this.path = path == null ? List.of() : List.copyOf(path);
             this.lookTarget = lookTarget;
+            this.lookPosition = lookPosition;
             this.targetBlock = targetBlock;
             this.targetFace = targetFace;
             this.targetEntityId = targetEntityId;
@@ -9943,26 +10167,31 @@ public final class PlayerProbeClient implements ClientModInitializer {
             this.lastProgressAtMs = this.startedAtMs;
             this.stuck = false;
             this.stuckReason = "";
+            this.destroyStarted = false;
         }
 
         static ActionState idle(String message) {
-            return new ActionState(ActionKind.IDLE, message, 0L, ManualControl.stop(), List.of(), null, null, null, -1, null, 0);
+            return new ActionState(ActionKind.IDLE, message, 0L, ManualControl.stop(), List.of(), null, null, null, null, -1, null, 0);
         }
 
         static ActionState manual(ManualControl manual, long untilMs, String message) {
-            return new ActionState(ActionKind.MANUAL, message, untilMs, manual, List.of(), null, null, null, -1, null, 0);
+            return new ActionState(ActionKind.MANUAL, message, untilMs, manual, List.of(), null, null, null, null, -1, null, 0);
         }
 
         static ActionState path(List<BlockPos> path, BlockPos lookTarget, String message) {
-            return new ActionState(ActionKind.PATH, message, 0L, ManualControl.stop(), path, lookTarget, null, null, -1, null, 0);
+            return new ActionState(ActionKind.PATH, message, 0L, ManualControl.stop(), path, lookTarget, null, null, null, -1, null, 0);
+        }
+
+        static ActionState look(Vec3 lookPosition, String message) {
+            return new ActionState(ActionKind.LOOK, message, 0L, ManualControl.stop(), List.of(), null, lookPosition, null, null, -1, null, 0);
         }
 
         static ActionState mine(BlockPos targetBlock, Direction targetFace, String message) {
-            return new ActionState(ActionKind.MINE, message, 0L, ManualControl.stop(), List.of(), null, targetBlock, targetFace, -1, null, 0);
+            return new ActionState(ActionKind.MINE, message, 0L, ManualControl.stop(), List.of(), null, null, targetBlock, targetFace, -1, null, 0);
         }
 
         static ActionState attack(int targetEntityId, String targetEntityUuid, int count, String message) {
-            return new ActionState(ActionKind.ATTACK, message, 0L, ManualControl.stop(), List.of(), null, null, null, targetEntityId, targetEntityUuid, count);
+            return new ActionState(ActionKind.ATTACK, message, 0L, ManualControl.stop(), List.of(), null, null, null, null, targetEntityId, targetEntityUuid, count);
         }
 
         ActionKind kind() {
@@ -10024,12 +10253,24 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return lookTarget;
         }
 
+        Vec3 lookPosition() {
+            return lookPosition;
+        }
+
         BlockPos targetBlock() {
             return targetBlock;
         }
 
         Direction targetFace() {
             return targetFace;
+        }
+
+        boolean destroyStarted() {
+            return destroyStarted;
+        }
+
+        void markDestroyStarted() {
+            destroyStarted = true;
         }
 
         int targetEntityId() {
@@ -10112,6 +10353,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
                     root.addProperty("pickupRadius", pickupRadius);
                     root.addProperty("untilMs", untilMs);
                 }
+            }
+
+            if (kind == ActionKind.LOOK && lookPosition != null) {
+                JsonObject target = new JsonObject();
+                target.addProperty("x", lookPosition.x);
+                target.addProperty("y", lookPosition.y);
+                target.addProperty("z", lookPosition.z);
+                root.add("lookPosition", target);
             }
 
             if (kind == ActionKind.MINE && targetBlock != null) {
