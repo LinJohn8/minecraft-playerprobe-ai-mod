@@ -224,6 +224,12 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/storage/organize` supports category-based transfer groups such as wood,
     blocks, ores, food, tools, combat, and farming.
   - `/survival/combat` supports optional shield bracing and kite/strafe steps.
+    Entity snapshots expose line-of-sight and vertical-distance fields for
+    threat filtering, and hungry combat skips the eating prelude when no real
+    food stack exists.
+  - `/survival/farm` includes bounded `hunt` and `eat` modes so the controller
+    can close the food-security loop with visible animal attacks, pickup, and
+    FOOD-component-checked consumption.
   - `/explore/markers` and `recordExploreMarker` provide local exploration
     memory for waypoints, route start/end, route summaries, and persist them
     under `~/.playerprobe/`.

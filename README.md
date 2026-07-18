@@ -425,5 +425,7 @@ Rebuild without Gradle:
 - Mining keeps the vanilla destroy process active and visibly swings the main hand. Ordinary exact mining still refuses an obstructed first hit; bounded tunnel/surface clearing may mine that visible obstruction first and replan the original target.
 - Combat walks into melee range, turns smoothly, requires a clear entity raycast, then attacks with normal hand swings.
 - World actions automatically close an open inventory/container before movement, looking, mining, combat, interaction, use, placement, or pickup.
+- Entity observations include `lineOfSight` and `verticalDistance`, allowing the controller to ignore hostiles sensed through solid cave layers. Combat only schedules an eating prelude when `equipBest(food)` finds a genuinely edible stack; ordinary zero-score hotbar items are never treated as food.
+- `/survival/farm` now also accepts bounded `hunt` and `eat` modes: hunting is restricted to ordinary food animals, requires current line of sight, swings normally, and picks up drops; eating equips only a real FOOD-component stack and waits for the use animation.
 - Set `pauseOnLostFocus:false` in the instance `options.txt` so autonomous movement continues while Live2D/OBS/HanwenOS has focus.
 - Ordinary movement never teleports. A three-block emergency relocation is internal-only and requires the same-position stuck state to recur at least three times for at least ten seconds after normal recovery is exhausted.

@@ -3460,6 +3460,8 @@ public final class PlayerProbeClient implements ClientModInitializer {
         root.addProperty("name", entity.getName().getString());
         root.add("pos", vecJson(entity.position()));
         root.addProperty("distance", Math.sqrt(player.distanceToSqr(entity)));
+        root.addProperty("verticalDistance", Math.abs(player.getY() - entity.getY()));
+        root.addProperty("lineOfSight", player.hasLineOfSight(entity));
         root.addProperty("onGround", entity.onGround());
         root.addProperty("hostile", entity instanceof Enemy);
         root.addProperty("living", entity instanceof LivingEntity);
@@ -3977,7 +3979,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         JsonObject detail = new JsonObject();
         detail.addProperty("mode", getString(request, "mode", "harvest"));
         detail.addProperty("crop", getString(request, "crop", "minecraft:wheat"));
-        detail.addProperty("notes", "Supports bounded harvest/plant/feed style chains using existing mine/place/interact primitives.");
+        detail.addProperty("notes", "Supports bounded harvest/plant/feed/hunt/eat chains using existing movement, combat, pickup, mine, place, and interact primitives.");
         return survivalPlanResponse(client, request, "farm", survivalFarmSteps(client, request), detail);
     }
 
@@ -5046,7 +5048,12 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return List.of();
         }
         List<JsonObject> steps = new ArrayList<>();
-        if (getBoolean(request, "eatIfHungry", true) && player.getFoodData().getFoodLevel() < clamp(getInt(request, "minFood", 10), 1, 20)) {
+        JsonObject foodEquipmentRequest = new JsonObject();
+        foodEquipmentRequest.addProperty("purpose", "food");
+        boolean hasUsableFood = findBestSlotForPurpose(player, level, "food", foodEquipmentRequest) >= 0;
+        if (getBoolean(request, "eatIfHungry", true)
+                && player.getFoodData().getFoodLevel() < clamp(getInt(request, "minFood", 10), 1, 20)
+                && hasUsableFood) {
             JsonObject equipFood = taskStep("equipBest");
             equipFood.addProperty("purpose", "food");
             steps.add(equipFood);
@@ -5129,6 +5136,45 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }
         String mode = getString(request, "mode", "harvest").trim().toLowerCase(Locale.ROOT);
         List<JsonObject> steps = new ArrayList<>();
+        if ("eat".equals(mode)) {
+            JsonObject foodRequest = new JsonObject();
+            foodRequest.addProperty("purpose", "food");
+            if (findBestSlotForPurpose(player, level, "food", foodRequest) >= 0) {
+                JsonObject equipFood = taskStep("equipBest");
+                equipFood.addProperty("purpose", "food");
+                steps.add(equipFood);
+                JsonObject eat = taskStep("useItem");
+                eat.addProperty("hand", "main");
+                steps.add(eat);
+                JsonObject wait = taskStep("wait");
+                wait.addProperty("durationMs", clamp(getInt(request, "eatMs", 1800), 1200, 4000));
+                steps.add(wait);
+            }
+            return steps;
+        }
+        if ("hunt".equals(mode)) {
+            String animalType = normalizeItemId(getString(request, "entityType", "minecraft:cow"));
+            Set<String> huntableAnimals = Set.of(
+                "minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:rabbit"
+            );
+            if (!huntableAnimals.contains(animalType)) {
+                return steps;
+            }
+            Entity animal = findNearestEntityByType(level, player, animalType, clamp(getInt(request, "radius", 16), 1, 64), false);
+            if (animal == null || !player.hasLineOfSight(animal)) {
+                return steps;
+            }
+            JsonObject equip = taskStep("equipBest");
+            equip.addProperty("purpose", "combat");
+            steps.add(equip);
+            JsonObject attack = taskStep("attackEntity");
+            attack.addProperty("entityUuid", animal.getUUID().toString());
+            attack.addProperty("count", clamp(getInt(request, "hits", 8), 1, 16));
+            steps.add(attack);
+            steps.add(waitForActionIdleStep(15000));
+            steps.add(pickupStep(10, 6000));
+            return steps;
+        }
         if ("feed".equals(mode)) {
             Entity animal = findNearestEntityByType(level, player, getString(request, "entityType", "minecraft:cow"), clamp(getInt(request, "radius", 12), 1, 64), false);
             if (animal != null) {
@@ -9401,6 +9447,12 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 case "food" -> foodScore(stack);
                 default -> miningScore(stack, state);
             };
+
+            // A zero food score means the stack is not edible. Do not let the
+            // first ordinary hotbar item become a false-positive food choice.
+            if ("food".equals(normalized) && score <= 0.0D) {
+                continue;
+            }
 
             if (score > bestScore) {
                 bestScore = score;
