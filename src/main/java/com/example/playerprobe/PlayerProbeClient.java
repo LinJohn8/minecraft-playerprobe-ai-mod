@@ -239,6 +239,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             server.createContext("/survival/anvil", this::handleSurvivalAnvil);
             server.createContext("/survival/anvilApply", this::handleSurvivalAnvilApply);
             server.createContext("/survival/explore", this::handleSurvivalExplore);
+            server.createContext("/survival/surface", this::handleSurvivalSurface);
             server.createContext("/craft/tree", this::handleCraftTree);
             server.createContext("/storage/organize", this::handleStorageOrganize);
             server.createContext("/build/template", this::handleBuildTemplate);
@@ -1598,6 +1599,10 @@ public final class PlayerProbeClient implements ClientModInitializer {
         handlePostPlanner(exchange, client -> request -> survivalExplorePlan(client, request));
     }
 
+    private void handleSurvivalSurface(HttpExchange exchange) throws IOException {
+        handlePostPlanner(exchange, client -> request -> survivalSurfacePlan(client, request));
+    }
+
     private void handleCraftTree(HttpExchange exchange) throws IOException {
         if (!isGet(exchange) && !isPost(exchange)) {
             sendText(exchange, 405, "Only GET or POST is supported.\n", "text/plain; charset=utf-8");
@@ -2171,8 +2176,23 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return;
         }
         HitResult sight = player.raycastHitResult(1.0F, player);
-        if (!(sight instanceof BlockHitResult blockHit) || !blockHit.getBlockPos().equals(target)) {
+        BlockHitResult blockHit = sight instanceof BlockHitResult hit ? hit : null;
+        if (blockHit == null || !blockHit.getBlockPos().equals(target)) {
             gameMode.stopDestroyBlock();
+            if (state.mineObstructions() && blockHit != null) {
+                BlockPos obstruction = blockHit.getBlockPos();
+                BlockState obstructionState = level.getBlockState(obstruction);
+                if (!obstructionState.isAir()
+                    && !isLiquidBlock(level, obstruction)
+                    && obstructionState.getDestroySpeed(level, obstruction) >= 0.0F
+                    && obstruction.distManhattan(target) <= 2
+                    && player.getEyePosition().distanceTo(obstruction.getCenter()) <= SAFE_BLOCK_INTERACTION_RANGE) {
+                    ActionState retargeted = ActionState.mine(obstruction, blockHit.getDirection(), "mine obstruction before " + target.toShortString());
+                    retargeted.setMineObstructions(true);
+                    actionState = retargeted;
+                    return;
+                }
+            }
             actionState = ActionState.idle("mine stopped: another block obstructs the target");
             restoreNormalInput(player);
             return;
@@ -3116,6 +3136,40 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return Optional.empty();
     }
 
+    private Optional<List<BlockPos>> findPathToHighestReachable(ClientLevel level, BlockPos rawStart, int radius, int targetY) {
+        BlockPos start = normalizeStandPosition(level, rawStart);
+        if (!isStandable(level, start)) {
+            return Optional.empty();
+        }
+        Queue<BlockPos> open = new ArrayDeque<>();
+        Set<BlockPos> visited = new HashSet<>();
+        Map<BlockPos, BlockPos> parent = new HashMap<>();
+        BlockPos highest = start;
+        open.add(start);
+        visited.add(start);
+        while (!open.isEmpty() && visited.size() < MAX_PATH_NODES) {
+            BlockPos current = open.remove();
+            if (current.getY() > highest.getY()
+                || (current.getY() == highest.getY() && current.distManhattan(start) < highest.distManhattan(start))) {
+                highest = current;
+            }
+            if (highest.getY() >= targetY) {
+                break;
+            }
+            for (BlockPos next : walkNeighbors(level, current, start, radius)) {
+                if (!visited.add(next)) {
+                    continue;
+                }
+                parent.put(next, current);
+                open.add(next);
+            }
+        }
+        if (highest.equals(start)) {
+            return Optional.empty();
+        }
+        return Optional.of(reconstructPath(parent, start, highest));
+    }
+
     private List<BlockPos> walkNeighbors(ClientLevel level, BlockPos current, BlockPos origin, int radius) {
         List<BlockPos> neighbors = new ArrayList<>(12);
         Direction[] directions = {Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST};
@@ -4025,6 +4079,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return survivalPlanResponse(client, request, "explore", survivalExploreSteps(client, request), detail);
     }
 
+    private JsonObject survivalSurfacePlan(Minecraft client, JsonObject request) {
+        JsonObject detail = new JsonObject();
+        detail.addProperty("radius", clamp(getInt(request, "radius", MAX_ACTION_RADIUS), 4, MAX_ACTION_RADIUS));
+        detail.addProperty("targetY", clamp(getInt(request, "targetY", 62), -64, 320));
+        detail.addProperty("notes", "Walks the existing tunnel network to the highest reachable standable point; repeated calls climb long mines without teleporting.");
+        return survivalPlanResponse(client, request, "surface", survivalSurfaceSteps(client, request), detail);
+    }
+
     private JsonObject craftTreePlan(Minecraft client, JsonObject request) {
         LocalPlayer player = client.player;
         ClientLevel level = client.level;
@@ -4501,37 +4563,50 @@ public final class PlayerProbeClient implements ClientModInitializer {
         Direction facing = player.getDirection();
         BlockPos feet = player.blockPosition();
         BlockPos front = feet.relative(facing);
+        boolean inLiquid = jsonBoolean(diagnostics, "inLiquid", false);
+        boolean frontLiquid = jsonBoolean(diagnostics, "frontLiquid", false);
 
         if (jsonBoolean(diagnostics, "headBlocked", false) && canMineForRecovery(level, feet.above())) {
+            steps.add(equipBestForMiningStep(feet.above()));
             steps.add(mineBlockStep(feet.above()));
             steps.add(waitForActionIdleStep(12000));
+            steps.add(verifyAirStep(feet.above()));
         }
         if (jsonBoolean(diagnostics, "frontBlocked", false)) {
-            if (canMineForRecovery(level, front)) {
-                steps.add(mineBlockStep(front));
-                steps.add(waitForActionIdleStep(12000));
-            }
             if (canMineForRecovery(level, front.above())) {
+                steps.add(equipBestForMiningStep(front.above()));
                 steps.add(mineBlockStep(front.above()));
                 steps.add(waitForActionIdleStep(12000));
+                steps.add(verifyAirStep(front.above()));
+            }
+            if (canMineForRecovery(level, front)) {
+                steps.add(equipBestForMiningStep(front));
+                steps.add(mineBlockStep(front));
+                steps.add(waitForActionIdleStep(12000));
+                steps.add(verifyAirStep(front));
             }
         }
-        if (jsonBoolean(diagnostics, "frontGap", false) || isLiquidBlock(level, front.below())) {
+        if (!inLiquid && (jsonBoolean(diagnostics, "frontGap", false) || isLiquidBlock(level, front.below()))) {
             steps.add(buildRefillStep(bridgeBlock, 0));
             steps.add(placeBlockStep(bridgeBlock, front.below(), "up"));
             steps.add(waitForActionIdleStep(3000));
         }
-        if (jsonBoolean(diagnostics, "inLiquid", false) || jsonBoolean(diagnostics, "frontLiquid", false)) {
-            steps.add(buildRefillStep(bridgeBlock, 0));
-            BlockPos fill = jsonBoolean(diagnostics, "frontLiquid", false) ? front : feet;
-            steps.add(placeBlockStep(bridgeBlock, fill, "up"));
-            steps.add(waitForActionIdleStep(3000));
-            JsonObject jump = taskStep("move");
-            jump.addProperty("jump", true);
-            jump.addProperty("forward", true);
-            jump.addProperty("durationMs", clamp(getInt(request, "swimJumpMs", 700), 100, 3000));
-            steps.add(jump);
-            steps.add(waitForActionIdleStep(3000));
+        if (inLiquid) {
+            JsonObject swimOut = taskStep("move");
+            swimOut.addProperty("jump", true);
+            swimOut.addProperty("forward", true);
+            swimOut.addProperty("sprint", false);
+            swimOut.addProperty("durationMs", clamp(getInt(request, "swimJumpMs", 1600), 300, 3000));
+            steps.add(swimOut);
+            steps.add(waitForActionIdleStep(5000));
+            return steps;
+        }
+        if (frontLiquid) {
+            JsonObject turnAway = taskStep("look");
+            turnAway.addProperty("yawDelta", getBoolean(request, "left", true) ? -90 : 90);
+            turnAway.addProperty("durationMs", 500);
+            steps.add(turnAway);
+            steps.add(waitForActionIdleStep(2000));
         }
 
         JsonObject back = taskStep("move");
@@ -4592,7 +4667,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
         steps.add(quickMoveItemStep(inputId, count, false, true));
         steps.add(quickMoveItemStep(fuelId, 1, false, true));
         JsonObject wait = taskStep("wait");
-        wait.addProperty("durationMs", clamp(getInt(request, "waitMs", 11000), 1000, 120000));
+        int requestedWaitMs = clamp(getInt(request, "waitMs", 11000), 1000, 120000);
+        int batchWaitMs = clamp(count * 10000 + 2000, 12000, 120000);
+        wait.addProperty("durationMs", Math.max(requestedWaitMs, batchWaitMs));
         steps.add(wait);
         JsonObject take = taskStep("containerTransfer");
         take.addProperty("from", 2);
@@ -5131,6 +5208,26 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 steps.add(verify);
             }
             if (steps.isEmpty() && getBoolean(request, "fallbackDig", true)) {
+                BlockPos buriedTarget = null;
+                double bestDistance = Double.MAX_VALUE;
+                for (JsonElement element : ores) {
+                    JsonObject posJson = element.getAsJsonObject().getAsJsonObject("pos");
+                    BlockPos candidate = blockPosFromJson(posJson, player.blockPosition());
+                    if (candidate.equals(player.blockPosition().below())) {
+                        continue;
+                    }
+                    double distance = candidate.distSqr(player.blockPosition());
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        buriedTarget = candidate;
+                    }
+                }
+                if (buriedTarget != null) {
+                    List<JsonObject> directedTunnel = survivalTunnelTowardTargetSteps(client, buriedTarget, request);
+                    if (!directedTunnel.isEmpty()) {
+                        return directedTunnel;
+                    }
+                }
                 JsonObject fallback = request.deepCopy();
                 fallback.remove("targetOre");
                 fallback.addProperty("mode", "stair");
@@ -5156,6 +5253,83 @@ public final class PlayerProbeClient implements ClientModInitializer {
         if (torchEvery > 0) {
             steps.addAll(survivalLightSteps(client, request));
         }
+        return steps;
+    }
+
+    private List<JsonObject> survivalTunnelTowardTargetSteps(Minecraft client, BlockPos target, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return List.of();
+        }
+        List<JsonObject> steps = new ArrayList<>();
+        BlockPos cursor = player.blockPosition();
+        int maxSegments = clamp(getInt(request, "tunnelLimit", 10), 1, 16);
+        int segments = 0;
+        while (Math.abs(target.getX() - cursor.getX()) + Math.abs(target.getZ() - cursor.getZ()) > 2
+            && segments < maxSegments) {
+            int dx = Integer.compare(target.getX(), cursor.getX());
+            int dz = Integer.compare(target.getZ(), cursor.getZ());
+            List<Direction> directions = new ArrayList<>();
+            if (Math.abs(target.getX() - cursor.getX()) >= Math.abs(target.getZ() - cursor.getZ())) {
+                if (dx != 0) directions.add(dx > 0 ? Direction.EAST : Direction.WEST);
+                if (dz != 0) directions.add(dz > 0 ? Direction.SOUTH : Direction.NORTH);
+            } else {
+                if (dz != 0) directions.add(dz > 0 ? Direction.SOUTH : Direction.NORTH);
+                if (dx != 0) directions.add(dx > 0 ? Direction.EAST : Direction.WEST);
+            }
+            Direction chosen = null;
+            for (Direction direction : directions) {
+                BlockPos foot = cursor.relative(direction);
+                if (!isLiquidBlock(level, foot)
+                    && !isLiquidBlock(level, foot.above())
+                    && !isLiquidBlock(level, foot.below())) {
+                    chosen = direction;
+                    break;
+                }
+            }
+            if (chosen == null) {
+                break;
+            }
+            BlockPos foot = cursor.relative(chosen).immutable();
+            for (BlockPos clear : List.of(foot.above(), foot)) {
+                BlockState state = level.getBlockState(clear);
+                if (state.isAir() || isLiquidBlock(level, clear) || state.getDestroySpeed(level, clear) < 0.0F) {
+                    continue;
+                }
+                steps.add(equipBestForMiningStep(clear));
+                JsonObject mine = mineBlockStep(clear);
+                mine.addProperty("mineObstructions", true);
+                steps.add(mine);
+                steps.add(waitForActionIdleStep(20000));
+                steps.add(verifyAirStep(clear));
+            }
+            JsonObject advance = taskStep("goto");
+            advance.addProperty("x", foot.getX());
+            advance.addProperty("y", foot.getY());
+            advance.addProperty("z", foot.getZ());
+            advance.addProperty("radius", clamp(getInt(request, "radius", 24), 4, MAX_ACTION_RADIUS));
+            steps.add(advance);
+            steps.add(waitForActionIdleStep(20000));
+            cursor = foot;
+            segments++;
+        }
+        if (segments == 0) {
+            return List.of();
+        }
+        JsonObject approach = taskStep("gotoVisibleBlock");
+        approach.addProperty("x", target.getX());
+        approach.addProperty("y", target.getY());
+        approach.addProperty("z", target.getZ());
+        approach.addProperty("radius", clamp(getInt(request, "radius", 24), 4, MAX_ACTION_RADIUS));
+        steps.add(approach);
+        steps.add(waitForActionIdleStep(20000));
+        steps.add(equipBestForMiningStep(target));
+        steps.add(mineBlockStep(target));
+        steps.add(waitForActionIdleStep(20000));
+        steps.add(verifyAirStep(target));
+        steps.add(pickupStep(8, 5000));
+        steps.add(waitForActionIdleStep(7000));
         return steps;
     }
 
@@ -5573,6 +5747,84 @@ public final class PlayerProbeClient implements ClientModInitializer {
         return steps;
     }
 
+    private List<JsonObject> survivalSurfaceSteps(Minecraft client, JsonObject request) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return List.of();
+        }
+        int radius = clamp(getInt(request, "radius", MAX_ACTION_RADIUS), 4, MAX_ACTION_RADIUS);
+        int targetY = clamp(getInt(request, "targetY", 62), -64, 320);
+        Optional<List<BlockPos>> path = findPathToHighestReachable(level, player.blockPosition(), radius, targetY);
+        if (path.isEmpty() || path.get().isEmpty()) {
+            return upwardStairTowardSurfaceSteps(client, request, targetY);
+        }
+        BlockPos target = path.get().get(path.get().size() - 1);
+        JsonObject go = taskStep("goto");
+        go.addProperty("x", target.getX());
+        go.addProperty("y", target.getY());
+        go.addProperty("z", target.getZ());
+        go.addProperty("radius", radius);
+        List<JsonObject> steps = new ArrayList<>();
+        steps.add(go);
+        steps.add(waitForActionIdleStep(60000));
+        return steps;
+    }
+
+    private List<JsonObject> upwardStairTowardSurfaceSteps(Minecraft client, JsonObject request, int targetY) {
+        LocalPlayer player = client.player;
+        ClientLevel level = client.level;
+        if (player == null || level == null) {
+            return List.of();
+        }
+        BlockPos cursor = player.blockPosition();
+        BlockPos stairStart = cursor;
+        Direction preferred = player.getDirection();
+        List<Direction> directions = List.of(preferred, preferred.getClockWise(), preferred.getCounterClockWise(), preferred.getOpposite());
+        Direction direction = directions.stream()
+            .filter(candidate -> !isLiquidBlock(level, stairStart.relative(candidate)) && !isLiquidBlock(level, stairStart.relative(candidate).above()))
+            .findFirst()
+            .orElse(preferred);
+        int climbs = Math.min(clamp(getInt(request, "climbSteps", 1), 1, 4), Math.max(1, targetY - cursor.getY()));
+        String bridgeBlock = normalizeItemId(getString(request, "bridgeBlockId", "minecraft:cobblestone"));
+        List<JsonObject> steps = new ArrayList<>();
+        for (int i = 0; i < climbs; i++) {
+            BlockPos next = cursor.relative(direction).above().immutable();
+            BlockPos support = next.below();
+            if (level.getBlockState(support).isAir() || isLiquidBlock(level, support)) {
+                steps.add(buildRefillStep(bridgeBlock, 0));
+                steps.add(placeBlockStep(bridgeBlock, support, "up"));
+                steps.add(waitForActionIdleStep(3000));
+            }
+            for (BlockPos clear : List.of(next.above(), next)) {
+                BlockState state = level.getBlockState(clear);
+                if (state.isAir()) {
+                    continue;
+                }
+                if (isLiquidBlock(level, clear) || state.getDestroySpeed(level, clear) < 0.0F) {
+                    break;
+                }
+                steps.add(equipBestForMiningStep(clear));
+                JsonObject mine = mineBlockStep(clear);
+                mine.addProperty("mineObstructions", true);
+                steps.add(mine);
+                steps.add(waitForActionIdleStep(20000));
+                JsonObject verify = verifyAirStep(clear);
+                verify.addProperty("soft", true);
+                steps.add(verify);
+            }
+            JsonObject go = taskStep("goto");
+            go.addProperty("x", next.getX());
+            go.addProperty("y", next.getY());
+            go.addProperty("z", next.getZ());
+            go.addProperty("radius", 8);
+            steps.add(go);
+            steps.add(waitForActionIdleStep(20000));
+            cursor = next;
+        }
+        return steps;
+    }
+
     private List<JsonObject> lineMineTowardSteps(ClientLevel level, BlockPos start, BlockPos target, int limit) {
         List<JsonObject> steps = new ArrayList<>();
         BlockPos cursor = start;
@@ -5679,10 +5931,28 @@ public final class PlayerProbeClient implements ClientModInitializer {
             steps.add(craft);
         }
         if (inventoryCount(player.getInventory(), itemId) > 0 || craftIfMissing) {
-            BlockPos placeAt = player.blockPosition().relative(player.getDirection(), 2);
+            BlockPos placeAt = nearbyWorkstationPlacement(level, player);
             steps.add(placeBlockStep(itemId, placeAt, "up"));
             steps.add(waitForActionIdleStep(1000));
         }
+    }
+
+    private BlockPos nearbyWorkstationPlacement(ClientLevel level, LocalPlayer player) {
+        BlockPos origin = player.blockPosition();
+        Direction facing = player.getDirection();
+        List<Direction> directions = List.of(facing, facing.getClockWise(), facing.getCounterClockWise(), facing.getOpposite());
+        for (int distance : List.of(2, 1, 3)) {
+            for (Direction direction : directions) {
+                BlockPos candidate = origin.relative(direction, distance).immutable();
+                if (isPassable(level, candidate)
+                    && isFloor(level, candidate.below())
+                    && !isLiquidBlock(level, candidate)
+                    && !isLiquidBlock(level, candidate.below())) {
+                    return candidate;
+                }
+            }
+        }
+        return origin.relative(facing.getOpposite(), 2).immutable();
     }
 
     private JsonObject quickMoveItemStep(String itemId, int count, boolean containerOnly, boolean inventoryOnly) {
@@ -6272,6 +6542,11 @@ public final class PlayerProbeClient implements ClientModInitializer {
             steps.add(taskStep("openInventory"));
             steps.add(waitForScreenStep("InventoryScreen", 3000));
         }
+        addVisibleCraftResultSteps(steps, normalized, count, useTable, true);
+    }
+
+    private void addVisibleCraftResultSteps(List<JsonObject> steps, String itemId, int count, boolean useTable, boolean closeWhenDone) {
+        String normalized = normalizeItemId(itemId);
         int runs = clamp(count, 1, 64);
         for (int i = 0; i < runs; i++) {
             JsonObject placeRecipe = taskStep("placeCraftRecipe");
@@ -6286,10 +6561,12 @@ public final class PlayerProbeClient implements ClientModInitializer {
             inspectResult.addProperty("durationMs", 450);
             steps.add(inspectResult);
         }
-        steps.add(taskStep("closeScreen"));
-        JsonObject settle = taskStep("wait");
-        settle.addProperty("durationMs", 250);
-        steps.add(settle);
+        if (closeWhenDone) {
+            steps.add(taskStep("closeScreen"));
+            JsonObject settle = taskStep("wait");
+            settle.addProperty("durationMs", 250);
+            steps.add(settle);
+        }
     }
 
     private JsonObject survivalRequirementsFromRequest(JsonObject request) {
@@ -7393,17 +7670,21 @@ public final class PlayerProbeClient implements ClientModInitializer {
         BlockPos pos = blockPosFromJson(request, player.blockPosition());
         String expectedId = normalizeBlockId(getString(request, "blockId", getString(request, "id", "")));
         boolean shouldBeAir = getBoolean(request, "shouldBeAir", false);
+        boolean soft = getBoolean(request, "soft", false);
         BlockState state = level.getBlockState(pos);
         String actualId = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
-        boolean ok = shouldBeAir ? state.isAir() : (expectedId.isBlank() || expectedId.equals(actualId));
+        boolean verified = shouldBeAir ? state.isAir() : (expectedId.isBlank() || expectedId.equals(actualId));
+        boolean ok = verified || soft;
 
         JsonObject root = new JsonObject();
         root.addProperty("ok", ok);
         root.add("pos", blockPosJson(pos));
         root.addProperty("expectedBlockId", expectedId);
         root.addProperty("shouldBeAir", shouldBeAir);
+        root.addProperty("verified", verified);
+        root.addProperty("soft", soft);
         root.add("block", blockJson(level, pos, null));
-        if (!ok) {
+        if (!verified) {
             root.addProperty("message", "Block verification failed.");
         }
         return root;
@@ -8070,6 +8351,9 @@ public final class PlayerProbeClient implements ClientModInitializer {
                 step.addProperty("ok", true);
                 step.addProperty("pathLength", path.get().path().size());
             }));
+            JsonObject retry = request.deepCopy();
+            retry.addProperty("action", "openNearbyContainer");
+            taskState.insertStepsAfterCurrent(List.of(retry));
             taskState.startActionIdleWait(clamp(getInt(request, "timeoutMs", 15000), 0, 120000));
             JsonObject root = new JsonObject();
             root.addProperty("ok", true);
@@ -8092,20 +8376,26 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
     private JsonObject runContainerTransferProcessTask(Minecraft client, JsonObject request) {
         JsonArray steps = new JsonArray();
-        JsonObject open = runOpenNearbyContainerTask(client, request);
-        steps.add(stepJson("open_nearby_container_process", step -> mergeInto(step, open)));
-        if (open.has("error") || (open.has("ok") && !open.get("ok").getAsBoolean())) {
-            JsonObject root = errorJson("ContainerOpenFailed", open.has("message") ? open.get("message").getAsString() : "Could not open nearby container.");
-            root.add("steps", steps);
-            return root;
-        }
-        if (open.has("waitingForActionIdle") && open.get("waitingForActionIdle").getAsBoolean()) {
-            JsonObject root = new JsonObject();
-            root.addProperty("ok", true);
-            root.addProperty("waitingForActionIdle", true);
-            root.addProperty("processMode", "player_like");
-            root.add("steps", steps);
-            return root;
+        if (!getBoolean(request, "resumeTransfer", false)) {
+            JsonObject open = runOpenNearbyContainerTask(client, request);
+            steps.add(stepJson("open_nearby_container_process", step -> mergeInto(step, open)));
+            if (open.has("error") || (open.has("ok") && !open.get("ok").getAsBoolean())) {
+                JsonObject root = errorJson("ContainerOpenFailed", open.has("message") ? open.get("message").getAsString() : "Could not open nearby container.");
+                root.add("steps", steps);
+                return root;
+            }
+            if (open.has("waitingForActionIdle") && open.get("waitingForActionIdle").getAsBoolean()) {
+                List<JsonObject> continuation = new ArrayList<>(taskState.removeStepsAfterCurrent(1));
+                JsonObject resume = request.deepCopy();
+                resume.addProperty("action", "containerTransferProcess");
+                resume.addProperty("resumeTransfer", true);
+                continuation.add(resume);
+                taskState.insertStepsAfterCurrent(continuation);
+                JsonObject root = open.deepCopy();
+                root.addProperty("processContinuationQueued", true);
+                root.add("steps", steps);
+                return root;
+            }
         }
 
         JsonObject verify = runVerifyContainerTask(client, requestForContainerType(""));
@@ -8166,23 +8456,22 @@ public final class PlayerProbeClient implements ClientModInitializer {
             return root;
         }
 
-        JsonObject verify = requestForScreen("InventoryScreen");
-        JsonObject verifyScreen = runVerifyContainerTask(client, requestForContainerType("inventory"));
-        steps.add(stepJson("verify_inventory_menu", step -> mergeInto(step, verifyScreen)));
-        if (verifyScreen.has("error") || (verifyScreen.has("ok") && !verifyScreen.get("ok").getAsBoolean())) {
-            JsonObject root = errorJson("InventoryVerifyFailed", "Inventory menu did not open as expected.");
-            root.add("steps", steps);
-            return root;
-        }
+        List<JsonObject> continuation = new ArrayList<>();
+        continuation.add(waitForScreenStep("InventoryScreen", 3000));
+        addVisibleCraftResultSteps(
+            continuation,
+            getString(request, "itemId", ""),
+            clamp(getInt(request, "count", 1), 1, 64),
+            false,
+            true
+        );
+        taskState.insertStepsAfterCurrent(continuation);
 
-        JsonObject craftRequest = request.deepCopy();
-        craftRequest.addProperty("useTable", false);
-        JsonObject craft = craftFromRequest(client, craftRequest);
-        steps.add(stepJson("craft_inventory", step -> mergeInto(step, craft)));
-        JsonObject close = runCloseScreenTask(client);
-        steps.add(stepJson("close_screen", step -> mergeInto(step, close)));
-
-        JsonObject root = craft.deepCopy();
+        JsonObject root = new JsonObject();
+        root.addProperty("ok", true);
+        root.addProperty("processMode", "player_like_visible");
+        root.addProperty("processContinuationQueued", true);
+        root.add("queuedSteps", taskStepsJson(continuation));
         root.add("steps", steps);
         return root;
     }
@@ -8221,28 +8510,23 @@ public final class PlayerProbeClient implements ClientModInitializer {
             root.add("steps", steps);
             return root;
         }
+        List<JsonObject> continuation = new ArrayList<>();
         if (open.has("waitingForActionIdle") && open.get("waitingForActionIdle").getAsBoolean()) {
-            JsonObject root = open.deepCopy();
-            root.add("steps", steps);
-            return root;
+            continuation.addAll(taskState.removeStepsAfterCurrent(1));
         }
+        continuation.add(waitForScreenStep("CraftingScreen", 5000));
+        addVisibleCraftResultSteps(
+            continuation,
+            getString(request, "itemId", ""),
+            clamp(getInt(request, "count", 1), 1, 64),
+            true,
+            true
+        );
+        taskState.insertStepsAfterCurrent(continuation);
 
-        JsonObject verify = runVerifyContainerTask(client, requestForContainerType("crafting"));
-        steps.add(stepJson("verify_crafting_menu", step -> mergeInto(step, verify)));
-        if (verify.has("error") || (verify.has("ok") && !verify.get("ok").getAsBoolean())) {
-            JsonObject root = errorJson("CraftingTableVerifyFailed", "Crafting table menu did not open as expected.");
-            root.add("steps", steps);
-            return root;
-        }
-
-        JsonObject craftRequest = request.deepCopy();
-        craftRequest.addProperty("useTable", true);
-        JsonObject craft = craftFromRequest(client, craftRequest);
-        steps.add(stepJson("craft_table", step -> mergeInto(step, craft)));
-        JsonObject close = runCloseScreenTask(client);
-        steps.add(stepJson("close_screen", step -> mergeInto(step, close)));
-
-        JsonObject root = craft.deepCopy();
+        JsonObject root = open.deepCopy();
+        root.addProperty("processContinuationQueued", true);
+        root.add("queuedSteps", taskStepsJson(continuation));
         root.add("steps", steps);
         return root;
     }
@@ -8369,6 +8653,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         }));
 
         actionState = ActionState.mine(target, face, "mineBlock " + target.toShortString());
+        actionState.setMineObstructions(getBoolean(request, "mineObstructions", false));
         steps.add(stepJson("start_breaking", step -> {
             step.addProperty("ok", true);
             step.addProperty("actionKind", actionState.kind().name().toLowerCase(Locale.ROOT));
@@ -10781,6 +11066,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
         private boolean stuck;
         private String stuckReason;
         private boolean destroyStarted;
+        private boolean mineObstructions;
 
         private ActionState(
             ActionKind kind,
@@ -10817,6 +11103,7 @@ public final class PlayerProbeClient implements ClientModInitializer {
             this.stuck = false;
             this.stuckReason = "";
             this.destroyStarted = false;
+            this.mineObstructions = false;
         }
 
         static ActionState idle(String message) {
@@ -10920,6 +11207,14 @@ public final class PlayerProbeClient implements ClientModInitializer {
 
         void markDestroyStarted() {
             destroyStarted = true;
+        }
+
+        boolean mineObstructions() {
+            return mineObstructions;
+        }
+
+        void setMineObstructions(boolean mineObstructions) {
+            this.mineObstructions = mineObstructions;
         }
 
         int targetEntityId() {

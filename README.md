@@ -385,6 +385,8 @@ Process notes:
 - Block placement is idempotent: a target already containing the requested block is accepted as complete, and verified world state wins over a stale/failing interaction result. Interrupted builds can therefore resume instead of repeatedly failing on their first previously placed block.
 - `/survival/enchant` exposes experience/lapis/table checks and a preparation chain for opening a nearby or placed enchanting table. Final option selection can be completed with the lower-level container interfaces after the screen is open.
 - `/survival/smelt`, `/survival/brew`, `/survival/anvil`, `/survival/trade`, and `/storage/organize` use the real container UI plus quick-move/click primitives. Exact slot choice remains visible to the LLM through `/container`.
+- `/survival/surface` walks to the highest point reachable through the current tunnel graph. If the route ends underground it clears and walks one upward stair, then expects the caller to observe and replan; this keeps long ascents bounded and non-teleporting.
+- Player-like crafting processes stage asynchronous table/container opening and recipe result synchronization. Furnace placement scans for supported free air and batch smelting waits long enough for every requested input before collecting output.
 - `/container/semantic`, `/container/clickRole`, `/container/button`, `/container/text`, and `/container/moveToSlot` expose UI-specific role maps, precise slot moves, role slot item snapshots, screen/menu metadata, anvil rename text, enchant costs/clues, merchant trade metadata, furnace/brewing progress metadata, and menu-button operations for furnace, brewing, anvil, enchanting, merchant/trading, crafting, and inventory menus.
 - `/survival/enchantApply`, `/survival/tradeSelect`, and `/survival/anvilApply` use those semantic UI controls to perform the most common final UI actions.
 - `action/status` now includes `stuck`, `stuckReason`, `recoveryHint`, and movement diagnostics for front obstruction, gaps, liquids, head space, raycast, and recovery hints.
@@ -420,7 +422,7 @@ Rebuild without Gradle:
 ### Player-like safety behavior
 
 - `POST /action/respawn` cancels the dead player's previous task/action and requests the vanilla respawn flow.
-- Mining keeps the vanilla destroy process active and visibly swings the main hand; it still refuses an obstructed first hit.
+- Mining keeps the vanilla destroy process active and visibly swings the main hand. Ordinary exact mining still refuses an obstructed first hit; bounded tunnel/surface clearing may mine that visible obstruction first and replan the original target.
 - Combat walks into melee range, turns smoothly, requires a clear entity raycast, then attacks with normal hand swings.
 - World actions automatically close an open inventory/container before movement, looking, mining, combat, interaction, use, placement, or pickup.
 - Set `pauseOnLostFocus:false` in the instance `options.txt` so autonomous movement continues while Live2D/OBS/HanwenOS has focus.

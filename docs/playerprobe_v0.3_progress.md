@@ -227,6 +227,21 @@ what still needs to be finished for the Minecraft AI player mod.
   - `/explore/markers` and `recordExploreMarker` provide local exploration
     memory for waypoints, route start/end, route summaries, and persist them
     under `~/.playerprobe/`.
+- v0.3 real survival completion hardening:
+  - Crafting-table and inventory process wrappers now queue visible recipe
+    placement/result steps after asynchronous walking, looking, and screen
+    opening instead of consuming the outer task early.
+  - Workstations choose a nearby empty supported placement instead of blindly
+    overwriting the block two spaces ahead; furnace wait time scales with the
+    requested smelting batch.
+  - Liquid recovery clears the visible obstruction and swims out without
+    placing a block inside the player's own collision box.
+  - Buried ore fallback tunnels toward known matches one walkable segment at a
+    time and can mine a genuine first-hit obstruction before replanning.
+  - `/survival/surface` follows the highest reachable tunnel route, then cuts
+    one verified upward stair per task when the old path ends. The real save
+    completed raw iron -> three ingots -> iron pickaxe and climbed from y=-11
+    to y=-9 without teleporting.
 - Build artifact generated successfully:
   - `finalMod/playerprobe-1.0.0-v0.3.jar`
 
